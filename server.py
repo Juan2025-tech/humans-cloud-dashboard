@@ -10,7 +10,7 @@ from flask_socketio import SocketIO
 # --- Configuración ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'clave-secreta-local')
-socketio = SocketIO(app)
+socketio = SocketIO(app, cors_allowed_origins="*")  # Para WebSocket desde cualquier origen
 
 # --- Estado y Umbrales ---
 MAX_HISTORY = 120
@@ -21,6 +21,9 @@ last_data_packet = {}
 CRITICAL_SPO2 = 92
 CRITICAL_HR_LOW = 60
 CRITICAL_HR_HIGH = 150
+
+# --- API_KEY para ESP32 ---
+API_KEY = os.environ.get("API_KEY", "f3b2a8d9c6e1f0a7d4b8c2e9f1a3b7d6")
 
 # --- Configuración de Email y CSV ---
 EMAIL_TO = "jperez@intecestudio.com"
@@ -65,14 +68,20 @@ def send_alert_email(subject, message):
 @app.route('/api/data', methods=['POST'])
 def receive_data():
     global last_data_packet
+    # Validar API_KEY
+    if request.headers.get("X-API-KEY") != API_KEY:
+        return jsonify({"error": "Forbidden"}), 403
+
     data = request.get_json()
-    if not data: return jsonify({"error": "Petición vacía"}), 400
+    if not data: 
+        return jsonify({"error": "Petición vacía"}), 400
 
     print(f"Datos recibidos del ESP32: {data}")
     spo2 = data.get('spo2')
     hr = data.get('hr')
 
-    if spo2 is None or hr is None: return jsonify({"error": "Faltan 'spo2' o 'hr'"}), 400
+    if spo2 is None or hr is None: 
+        return jsonify({"error": "Faltan 'spo2' o 'hr'"}), 400
 
     spo2_hist.append(spo2)
     hr_hist.append(hr)
@@ -111,6 +120,7 @@ def handle_connect():
 def handle_disconnect():
     print('Cliente web desconectado.')
 
-# --- Ejecución (solo para pruebas locales) ---
+# --- Ejecución local ---
 if __name__ == '__main__':
-    socketio.run(app, host='127.0.0.1', port=5000, debug=True)
+    socketio.run(app, host='0.0.0.0', port=int(os.environ.get("PORT", 5000)), debug=True)
+
