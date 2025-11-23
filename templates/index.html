@@ -20,7 +20,7 @@
     .value.warn { color:#e74c3c; }
     .patient-box { margin:15px auto; background: rgba(255,255,255,0.6); padding:12px; border-radius:8px; text-align:left; width:90%; }
     canvas { width:100% !important; height:300px !important; }
-    .alerting { box-shadow:0 0 0 8px rgba(231,76,60,0.08); border-radius:12px; animation: pulse 1s infinite; }
+    .alerting { animation: pulse 1s infinite; }
     @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(231,76,60,0.0);} 50% { box-shadow:0 0 0 12px rgba(231,76,60,0.12);} 100% { box-shadow:0 0 0 0 rgba(231,76,60,0.0);} }
     .controls { text-align:center; margin-top:12px; }
     .btn { padding:8px 14px; border-radius:8px; border:none; cursor:pointer; background:#1c70d6; color:white; font-weight:600; }
@@ -30,23 +30,15 @@
 <body>
   <div class="container" id="mainCard">
     <h1>HumanS — Monitor Vital</h1>
-    <div style="text-align: center;">
-        <div id="status" class="status disconnected">Conectando...</div>
-    </div>
+    <div style="text-align: center;"><div id="status" class="status disconnected">Conectando...</div></div>
     <div class="patient-box">
       <strong>Paciente:</strong> Paciente01 &nbsp; <strong>Edad:</strong> 81 años  
 
       <strong>Residencia:</strong> Residencia Albareda &nbsp; <strong>Habitación:</strong> 101
     </div>
     <div class="top-row">
-      <div class="big">
-        <div class="label">SpO₂ (%)</div>
-        <div id="spo2" class="value">--</div>
-      </div>
-      <div class="big">
-        <div class="label">HR (bpm)</div>
-        <div id="hr" class="value">--</div>
-      </div>
+      <div class="big"><div class="label">SpO₂ (%)</div><div id="spo2" class="value">--</div></div>
+      <div class="big"><div class="label">HR (bpm)</div><div id="hr" class="value">--</div></div>
     </div>
     <canvas id="dualChart"></canvas>
     <div class="controls">
@@ -54,97 +46,32 @@
       <button id="clearBtn" class="btn">Borrar Gráfica</button>
     </div>
   </div>
-
   <script>
-    // ¡CAMBIO IMPORTANTE! io() sin URL se conecta al servidor de origen.
-    const socket = io();
-
-    socket.on('connect', ()=> {
-      const st = document.getElementById('status');
-      st.textContent = 'Conectado';
-      st.className = 'status connected';
-    });
-    socket.on('disconnect', ()=> {
-      const st = document.getElementById('status');
-      st.textContent = 'Desconectado';
-      st.className = 'status disconnected';
-    });
-
+    const socket = io(); // Se conecta al servidor de origen (funciona en local y en la nube)
+    socket.on('connect', ()=> { document.getElementById('status').textContent = 'Conectado'; document.getElementById('status').className = 'status connected'; });
+    socket.on('disconnect', ()=> { document.getElementById('status').textContent = 'Desconectado'; document.getElementById('status').className = 'status disconnected'; });
     const ctx = document.getElementById('dualChart').getContext('2d');
-    const dualChart = new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels: [],
-        datasets: [
-          { label: 'SpO₂', data: [], borderColor: '#0074D9', tension:0.2, yAxisID:'y' },
-          { label: 'HR',  data: [], borderColor: '#FF4136', tension:0.2, yAxisID:'y1' }
-        ]
-      },
-      options: {
-        animation:false,
-        interaction:{mode:'index',intersect:false},
-        scales:{
-          y: { type:'linear', position:'left', min:60, max:100, title:{display:true, text:'SpO₂ %'} },
-          y1:{ type:'linear', position:'right', min:30, max:180, grid:{drawOnChartArea:false}, title:{display:true, text:'HR bpm'} }
-        }
-      }
-    });
-
+    const dualChart = new Chart(ctx, { type: 'line', data: { labels: [], datasets: [ { label: 'SpO₂', data: [], borderColor: '#0074D9', tension:0.2, yAxisID:'y' }, { label: 'HR',  data: [], borderColor: '#FF4136', tension:0.2, yAxisID:'y1' } ] }, options: { animation:false, interaction:{mode:'index',intersect:false}, scales:{ y: { type:'linear', position:'left', min:60, max:100, title:{display:true, text:'SpO₂ %'} }, y1:{ type:'linear', position:'right', min:30, max:180, grid:{drawOnChartArea:false}, title:{display:true, text:'HR bpm'} } } } });
     let paused = false;
-    document.getElementById('pauseBtn').onclick = () => {
-      paused = !paused;
-      document.getElementById('pauseBtn').textContent = paused ? 'Reanudar' : 'Pausar';
-    };
-    document.getElementById('clearBtn').onclick = () => {
-      dualChart.data.labels = [];
-      dualChart.data.datasets[0].data = [];
-      dualChart.data.datasets[1].data = [];
-      dualChart.update();
-      document.getElementById('spo2').textContent = '--';
-      document.getElementById('hr').textContent = '--';
-    };
-
+    document.getElementById('pauseBtn').onclick = () => { paused = !paused; document.getElementById('pauseBtn').textContent = paused ? 'Reanudar' : 'Pausar'; };
+    document.getElementById('clearBtn').onclick = () => { dualChart.data.labels = []; dualChart.data.datasets[0].data = []; dualChart.data.datasets[1].data = []; dualChart.update(); document.getElementById('spo2').textContent = '--'; document.getElementById('hr').textContent = '--'; };
     let audioCtx = null;
-    function playAlertBeep() {
-      try {
-        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        const o = audioCtx.createOscillator();
-        const g = audioCtx.createGain();
-        o.type = 'sine'; o.frequency.value = 880; g.gain.value = 0.1;
-        o.connect(g); g.connect(audioCtx.destination);
-        o.start();
-        setTimeout(()=>{ o.stop(); }, 400);
-      } catch(e){ console.log("Audio error:", e); }
-    }
-
-    const mainCard = document.getElementById('mainCard');
-    function setAlertOn(on) {
-      if (on) mainCard.classList.add('alerting');
-      else mainCard.classList.remove('alerting');
-    }
-
+    function playAlertBeep() { try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); const o = audioCtx.createOscillator(); const g = audioCtx.createGain(); o.type = 'sine'; o.frequency.value = 880; g.gain.value = 0.1; o.connect(g); g.connect(audioCtx.destination); o.start(); setTimeout(()=>{ o.stop(); }, 400); } catch(e){ console.log("Audio error:", e); } }
     socket.on('update', data => {
       if (paused) return;
-      const spo2El = document.getElementById('spo2');
-      const hrEl   = document.getElementById('hr');
-      spo2El.textContent = data.spo2;
-      hrEl.textContent = data.hr;
-      spo2El.className = 'value ' + (data.spo2_critical ? 'warn' : 'good');
-      hrEl.className   = 'value ' + (data.hr_critical ? 'warn' : 'good');
-
-      const labels = data.spo2_history.map((_,i)=>i);
-      dualChart.data.labels = labels;
+      document.getElementById('spo2').textContent = data.spo2;
+      document.getElementById('hr').textContent = data.hr;
+      document.getElementById('spo2').className = 'value ' + (data.spo2_critical ? 'warn' : 'good');
+      document.getElementById('hr').className   = 'value ' + (data.hr_critical ? 'warn' : 'good');
+      dualChart.data.labels = data.spo2_history.map((_,i)=>i);
       dualChart.data.datasets[0].data = data.spo2_history;
       dualChart.data.datasets[1].data = data.hr_history;
       dualChart.update();
-
-      if (data.spo2_critical || data.hr_critical) {
-        setAlertOn(true);
-        playAlertBeep();
-      } else {
-        setAlertOn(false);
-      }
+      const isCritical = data.spo2_critical || data.hr_critical;
+      document.getElementById('mainCard').classList.toggle('alerting', isCritical);
+      if (isCritical) playAlertBeep();
     });
   </script>
 </body>
 </html>
+

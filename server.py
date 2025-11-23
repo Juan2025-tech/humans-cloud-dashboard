@@ -7,15 +7,13 @@ from collections import deque
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO
 
-# -------------------
-#  Configuración
-# -------------------
+# --- Configuración ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'clave-secreta-local')
 socketio = SocketIO(app)
 
-# Estado y Umbrales
-MAX_HISTORY = 120  # Puntos para la gráfica
+# --- Estado y Umbrales ---
+MAX_HISTORY = 120
 spo2_hist = deque(maxlen=MAX_HISTORY)
 hr_hist = deque(maxlen=MAX_HISTORY)
 last_data_packet = {}
@@ -24,15 +22,11 @@ CRITICAL_SPO2 = 92
 CRITICAL_HR_LOW = 60
 CRITICAL_HR_HIGH = 150
 
-# Configuración de Email
+# --- Configuración de Email y CSV ---
 EMAIL_TO = "jperez@intecestudio.com"
 EMAIL_FROM = os.environ.get("GMAIL_USER")
 EMAIL_PASS = os.environ.get("GMAIL_PASS")
 
-# --- Configuración de CSV ---
-# ADVERTENCIA: En servicios como Render (plan gratuito), el sistema de archivos es efímero.
-# Esto significa que el archivo CSV se borrará en cada despliegue o reinicio del servidor.
-# Para persistencia real, se recomienda una base de datos (ej. PostgreSQL).
 DATA_DIR = "data"
 CSV_PATH = os.path.join(DATA_DIR, "history.csv")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -41,9 +35,7 @@ if not os.path.exists(CSV_PATH):
         writer = csv.writer(f)
         writer.writerow(["timestamp_iso", "spo2", "hr", "spo2_critical", "hr_critical"])
 
-# -------------------
-#  Funciones Auxiliares
-# -------------------
+# --- Funciones Auxiliares ---
 def save_csv_row(spo2, hr, spo2_critical, hr_critical):
     ts = datetime.utcnow().isoformat()
     try:
@@ -51,11 +43,11 @@ def save_csv_row(spo2, hr, spo2_critical, hr_critical):
             writer = csv.writer(f)
             writer.writerow([ts, spo2, hr, int(spo2_critical), int(hr_critical)])
     except Exception as e:
-        print(f"ERROR: No se pudo guardar en CSV. Causa: {e}")
+        print(f"ERROR al guardar en CSV: {e}")
 
 def send_alert_email(subject, message):
     if not EMAIL_FROM or not EMAIL_PASS:
-        print("ADVERTENCIA: No se enviará email. Faltan GMAIL_USER o GMAIL_PASS.")
+        print("ADVERTENCIA: Faltan GMAIL_USER o GMAIL_PASS. No se enviará email.")
         return
     try:
         msg = MIMEText(message)
@@ -67,25 +59,20 @@ def send_alert_email(subject, message):
             server.sendmail(EMAIL_FROM, [EMAIL_TO], msg.as_string())
         print(f"Email de alerta enviado a {EMAIL_TO}.")
     except Exception as e:
-        print(f"ERROR: No se pudo enviar el email. Causa: {e}")
+        print(f"ERROR al enviar email: {e}")
 
-# -------------------
-#  Rutas (Endpoints) de la App
-# -------------------
+# --- Rutas de la App ---
 @app.route('/api/data', methods=['POST'])
 def receive_data():
-    """Recibe datos JSON del ESP32, los procesa, los guarda y los retransmite."""
     global last_data_packet
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "Petición vacía o no es JSON"}), 400
+    if not data: return jsonify({"error": "Petición vacía"}), 400
 
     print(f"Datos recibidos del ESP32: {data}")
     spo2 = data.get('spo2')
     hr = data.get('hr')
 
-    if spo2 is None or hr is None:
-        return jsonify({"error": "Faltan 'spo2' o 'hr'"}), 400
+    if spo2 is None or hr is None: return jsonify({"error": "Faltan 'spo2' o 'hr'"}), 400
 
     spo2_hist.append(spo2)
     hr_hist.append(hr)
@@ -112,25 +99,18 @@ def receive_data():
 
 @app.route('/')
 def index():
-    """Sirve la página principal del dashboard."""
     return render_template('index.html')
 
-# --------------------------
-#  Eventos de WebSocket
-# --------------------------
+# --- Eventos de WebSocket ---
 @socketio.on('connect')
 def handle_connect():
     print('Cliente web conectado.')
-    if last_data_packet:
-        socketio.emit('update', last_data_packet)
+    if last_data_packet: socketio.emit('update', last_data_packet)
 
 @socketio.on('disconnect')
 def handle_disconnect():
     print('Cliente web desconectado.')
 
-# --------------------------
-#  Ejecución (solo para pruebas locales)
-# --------------------------
+# --- Ejecución (solo para pruebas locales) ---
 if __name__ == '__main__':
-    print("Iniciando servidor en modo de depuración local.")
     socketio.run(app, host='127.0.0.1', port=5000, debug=True)
