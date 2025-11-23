@@ -20,7 +20,7 @@ from flask_socketio import SocketIO
 # --- Configuración ---
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'clave-secreta-local')
-# Pasamos async_mode='eventlet' explícitamente
+# Pasamos async_mode='eventlet' explícitamente para producción
 socketio = SocketIO(app, async_mode='eventlet')
 
 # --- Estado y Umbrales ---
@@ -42,19 +42,23 @@ DATA_DIR = "data"
 CSV_PATH = os.path.join(DATA_DIR, "history.csv")
 os.makedirs(DATA_DIR, exist_ok=True)
 if not os.path.exists(CSV_PATH):
-    with open(CSV_PATH, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["timestamp_iso", "spo2", "hr", "spo2_critical", "hr_critical"])
+    try:
+        with open(CSV_PATH, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["timestamp_iso", "spo2", "hr", "spo2_critical", "hr_critical"])
+    except OSError as e:
+        print(f"ADVERTENCIA: No se pudo crear el archivo CSV (puede ser normal en Render): {e}")
 
 # --- Funciones Auxiliares ---
 def save_csv_row(spo2, hr, spo2_critical, hr_critical):
-    ts = datetime.now(datetime.UTC).isoformat() # Usando el método recomendado y compatible
+    # ADVERTENCIA: Esta función puede fallar en sistemas de archivos efímeros como el de Render.
+    ts = datetime.now(datetime.UTC).isoformat()
     try:
         with open(CSV_PATH, "a", newline="") as f:
             writer = csv.writer(f)
             writer.writerow([ts, spo2, hr, int(spo2_critical), int(hr_critical)])
-    except Exception as e:
-        print(f"ERROR al guardar en CSV: {e}")
+    except OSError as e:
+        print(f"ADVERTENCIA: No se pudo escribir en el archivo CSV (puede ser normal en Render): {e}")
 
 def send_alert_email(subject, message):
     if not EMAIL_FROM or not EMAIL_PASS:
@@ -98,8 +102,14 @@ def receive_data():
     }
 
     socketio.emit('update', new_data_packet)
-    save_csv_row(spo2, hr, spo2_crit, hr_crit)
-
+    
+    # ===================================================================
+    # --- LÍNEA CRÍTICA COMENTADA PARA DEPURACIÓN ---
+    # Se deshabilita la escritura en CSV para evitar errores 500 en Render
+    # debido a permisos del sistema de archivos.
+    # ===================================================================
+    # save_csv_row(spo2, hr, spo2_crit, hr_crit) 
+    
     if spo2_crit and not last_data_packet.get('spo2_critical', False):
         send_alert_email("⚠ ALERTA CRÍTICA — SpO2 Baja", f"SpO₂ crítico: {spo2}%\nHR: {hr} bpm")
     if hr_crit and not last_data_packet.get('hr_critical', False):
@@ -110,6 +120,7 @@ def receive_data():
 
 @app.route('/')
 def index():
+    """Sirve la página principal del dashboard."""
     return render_template('index.html')
 
 # --- Eventos de WebSocket ---
@@ -124,5 +135,7 @@ def handle_disconnect():
 
 # --- Ejecución (solo para pruebas locales) ---
 if __name__ == '__main__':
-    # Para pruebas locales, el modo 'threading' sigue siendo válido
-    socketio.run(app, host='127.0.0.1', port=5000, debug=True)
+    # Para pruebas locales, el modo 'threading' es más fácil de depurar
+    print("Iniciando servidor en modo de depuración local.")
+    socketio.run(app, host='127.0.0.1', port=5000, debug=True, allow_unsafe_werkzeug=True)
+
