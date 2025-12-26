@@ -2,4 +2,6 @@ Flask
 Flask-SocketIO
 gunicorn
 eventlet
+numpy>=1.26
+
 
