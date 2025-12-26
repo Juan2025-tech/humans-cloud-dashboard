@@ -121,7 +121,9 @@ def receive_data():
         "hr_critical": hr < 45 or hr > 130
     }
 
-    data_queue.put(payload)
+    save_data(spo2, hr)
+    socketio.emit("update", payload)
+    
     return jsonify({"status": "ok"}), 200
 
 # --------------------------------------------------
