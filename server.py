@@ -74,7 +74,8 @@ def save_data(spo2, hr):
 # FLASK
 # --------------------------------------------------
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'clave-secreta-local')
+app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY")
+
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 @app.route("/")
