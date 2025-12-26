@@ -76,6 +76,8 @@ def save_data(spo2, hr):
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY")
 
+import eventlet
+eventlet.monkey_patch()
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
@@ -385,4 +387,4 @@ if __name__ == "__main__":
     
     # Render usa Gunicorn, pero este es para pruebas locales
     port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host="0.0.0.0", port=port, debug=False)
+    socketio.run(app, host="0.0.0.0", port=port)
