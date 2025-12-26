@@ -142,16 +142,17 @@
     window.addEventListener('error', (ev) => console.error('Error:', ev.message));
 
     let socket = null;
-    try {
-      socket = typeof io !== 'undefined' ? io('http://127.0.0.1:5000') : {
-        on: (e, cb) => console.log('[fallback] on', e),
-        emit: (e, p) => console.log('[fallback] emit', e, p)
-      };
-    } catch (e) {
-      console.warn('socket.io fallback:', e);
-      socket = { on: () => {}, emit: () => {} };
-    }
+try {
+  socket = typeof io !== 'undefined' ? io("https://humans-cloud-dashboard.onrender.com") : {
+    on: (e, cb) => console.log('[fallback] on', e),
+    emit: (e, p) => console.log('[fallback] emit', e, p)
+  };
+} catch (e) {
+  console.warn('socket.io fallback:', e);
+  socket = { on: () => {}, emit: () => {} };
+}
 
+// Configuración del gráfico
     let dualChart = null;
     try {
       const ctx = document.getElementById('dualChart').getContext('2d');
@@ -177,6 +178,7 @@
       console.warn('Chart.js fallback:', e);
     }
 
+    // Control de pausa y limpiar gráfico
     let paused = false;
     document.getElementById('pauseBtn').onclick = () => {
       paused = !paused;
@@ -194,6 +196,7 @@
       document.getElementById('hr').textContent = '--';
     };
 
+    // Alertas sonoras
     let audioCtx = null;
     function playAlertBeep(repeat = 1) {
       try {
