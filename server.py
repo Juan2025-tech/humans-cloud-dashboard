@@ -76,7 +76,9 @@ def save_data(spo2, hr):
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY")
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
+
 
 @app.route("/")
 def index():
@@ -123,7 +125,7 @@ def receive_data():
 
     save_data(spo2, hr)
     socketio.emit("update", payload)
-    
+
     return jsonify({"status": "ok"}), 200
 
 # --------------------------------------------------
@@ -368,7 +370,7 @@ def api_report_pdf():
         import traceback
         traceback.print_exc()
         return jsonify({"error": f"Error al generar el informe: {str(e)}"}), 500
-
+    
 # --------------------------------------------------
 # MAIN
 # --------------------------------------------------
