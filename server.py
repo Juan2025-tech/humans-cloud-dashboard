@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-import asyncio
-import threading
-import time
-import webbrowser
-import csv
+"""
+HumanS - Monitorización Vital Continua (Versión Render)
+Recibe datos del proxy HTTP (ESP32 Bridge)
+Sin dependencias BLE (Bleak)
+"""
+
 import os
+import csv
 import json
+import time
+import threading
 from datetime import datetime, timezone
 from collections import deque
 from queue import Queue, Empty
 from io import BytesIO
 
 import numpy as np
-from bleak import BleakClient, BleakScanner
 from flask import Flask, render_template, jsonify, request, send_file
 from flask_socketio import SocketIO
 from weasyprint import HTML
@@ -27,13 +30,7 @@ client = OpenAI()
 LLM_MODEL = "gpt-4o-mini"
 
 SYSTEM_NAME = "HumanS – Monitorización Vital Continua"
-ALGORITHM_VERSION = "1.0.2-clinical"
-
-# --------------------------------------------------
-# BLE UUIDs
-# --------------------------------------------------
-SEND_CHAR_UUID = "49535343-1E4D-4BD9-BA61-23C647249616"
-RECV_CHAR_UUID = "49535343-8841-43F4-A8D4-ECBE34729BB3"
+ALGORITHM_VERSION = "1.0.3-render"
 
 # --------------------------------------------------
 # CONFIG
@@ -43,24 +40,6 @@ spo2_hist = deque(maxlen=MAX_HISTORY)
 hr_hist = deque(maxlen=MAX_HISTORY)
 data_queue = Queue()
 stop_event = threading.Event()
-
-# Contador de paquetes para diagnóstico
-packet_count = 0
-raw_packet_queue = Queue()  # Cola para diagnóstico de operaciones
-raw_packet_throttle = 0  # Contador para reducir frecuencia de envío (1 de cada 5)
-
-# Cálculo de distancia (basado en RSSI) - SISTEMA HÍBRIDO
-TX_POWER = -70  # Potencia de transmisión típica del BerryMed
-N_FACTOR = 2.4  # Factor de propagación en interiores
-RSSI_WINDOW_SIZE = 10
-rssi_buffer = deque(maxlen=RSSI_WINDOW_SIZE)
-current_distance = 0.0
-current_rssi = None
-
-# SISTEMA DE RECONEXIÓN INTELIGENTE (para actualizar RSSI en macOS)
-CONNECTION_DURATION = 20  # segundos conectado antes de reconectar
-RECONNECTION_DELAY = 0.5  # segundos de pausa para scan de RSSI
-rssi_update_count = 0  # Contador de actualizaciones de RSSI
 
 # --------------------------------------------------
 # DATA STORAGE
@@ -75,114 +54,60 @@ if not os.path.exists(CSV_PATH):
         csv.writer(f).writerow(["timestamp", "spo2", "hr"])
 
 def save_data(spo2, hr):
+    """Guarda datos en CSV y JSONL"""
     ts = datetime.now(timezone.utc).isoformat()
-    with open(CSV_PATH, "a", newline="") as f:
-        csv.writer(f).writerow([ts, spo2, hr])
-    with open(JSON_PATH, "a") as f:
-        f.write(json.dumps({"timestamp_iso": ts, "spo2": spo2, "hr": hr}) + "\n")
+    
+    # Intentar escribir, pero no fallar si hay problemas (ej: Render filesystem)
+    try:
+        with open(CSV_PATH, "a", newline="") as f:
+            csv.writer(f).writerow([ts, spo2, hr])
+    except OSError as e:
+        print(f"[WARN] No se pudo escribir CSV: {e}")
+    
+    try:
+        with open(JSON_PATH, "a") as f:
+            f.write(json.dumps({"timestamp_iso": ts, "spo2": spo2, "hr": hr}) + "\n")
+    except OSError as e:
+        print(f"[WARN] No se pudo escribir JSONL: {e}")
 
 # --------------------------------------------------
 # FLASK
 # --------------------------------------------------
 app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'clave-secreta-local')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 @app.route("/")
 def index():
     return render_template("index10.html")
 
-# --------------------------------------------------
-# BLE DECODING (BERRY PROTOCOL V1.5)
-# --------------------------------------------------
-def calculate_distance(rssi):
-    """Calcula distancia en metros basada en RSSI"""
-    if rssi is None or rssi >= 0:
-        return 0.0
-    return round(10**((TX_POWER - rssi) / (10 * N_FACTOR)), 2)
-
-def decode_berry_packet(data: bytes):
-    """
-    Decodifica paquete según Berry Protocol v1.5
-    Retorna diccionario con todos los campos técnicos
-    """
-    if len(data) != 20:
-        return None
+@app.route("/api/data", methods=["POST"])
+def receive_data():
+    """Endpoint que recibe datos del proxy (ESP32 Bridge)"""
+    # Validar API Key
+    api_key = request.headers.get('x-api-key')
+    expected_key = os.environ.get('API_KEY', 'f3b2a8d9c6e1f0a7d4b8c2e9f1a3b7d6')
     
-    # Verificar encabezado (Byte0=0xFF, Byte1=0xAA)
-    if data[0] != 0xFF or data[1] != 0xAA:
-        return None
+    if api_key != expected_key:
+        print(f"[SECURITY] API Key inválida recibida: {api_key}")
+        return jsonify({"error": "Unauthorized"}), 401
     
-    # Extraer todos los campos según el protocolo
-    packet_info = {
-        "valid": True,
-        "pkt_index": data[2],
-        "status": data[3],
-        "spo2_avg": data[4] if data[4] != 127 else None,
-        "spo2_real": data[5] if data[5] != 127 else None,
-        "pulse_avg": data[6] if data[6] != 255 else None,
-        "pulse_real": data[7] if data[7] != 255 else None,
-        "rr_interval": (data[9] << 8) | data[8],  # High byte + Low byte
-        "perfu_index": data[10] if data[10] != 0 else None,
-        "perfu_index_real": data[11] if data[11] != 0 else None,
-        "pleth_wave": data[12] if data[12] != 0 else None,
-        "battery": data[17],
-        "freq": data[18],
-        "checksum": data[19]
-    }
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Petición vacía"}), 400
+
+    print(f"[HTTP] Datos recibidos del proxy: {data}")
     
-    # Validar checksum
-    calculated_checksum = sum(data[:19]) % 256
-    packet_info["checksum_valid"] = (calculated_checksum == data[19])
-    
-    # Decodificar status flags
-    packet_info["sensor_off"] = bool(data[3] & 0x01)
-    packet_info["no_finger"] = bool(data[3] & 0x02)
-    packet_info["no_pulse"] = bool(data[3] & 0x04)
-    packet_info["pulse_beat"] = bool(data[3] & 0x08)
-    
-    return packet_info
+    spo2 = data.get('spo2')
+    hr = data.get('hr')
 
-def decode_packet_for_monitoring(data: bytes):
-    """Decodifica solo para monitorización clínica (valores promediados)"""
-    if len(data) != 20:
-        return None
+    if spo2 is None or hr is None:
+        return jsonify({"error": "Faltan 'spo2' o 'hr'"}), 400
 
-    hr_samples = [data[3], data[8], data[13], data[18]]
-    spo2_samples = [data[4], data[9], data[14], data[19]]
+    # Validar rangos
+    if not (60 <= spo2 <= 100) or not (30 <= hr <= 220):
+        return jsonify({"error": "Valores fuera de rango"}), 400
 
-    hr_valid = [h for h in hr_samples if 45 <= h <= 180]
-    spo2_valid = [s for s in spo2_samples if 85 <= s <= 100]
-
-    if not hr_valid or not spo2_valid:
-        return None
-
-    return int(np.mean(spo2_valid)), int(np.mean(hr_valid))
-
-def handle_notification(sender, data):
-    global packet_count, raw_packet_throttle, current_distance
-    packet_count += 1
-    
-    # THROTTLE REDUCIDO: Solo enviar 1 de cada 5 paquetes al diagnóstico (50ms en vez de 10ms)
-    raw_packet_throttle += 1
-    should_send_diagnostic = (raw_packet_throttle >= 5)
-    
-    if should_send_diagnostic:
-        raw_packet_throttle = 0  # Reset contador
-        
-        # Enviar diagnóstico simplificado (solo contador + distancia)
-        raw_payload = {
-            "count": packet_count,
-            "distance": current_distance,
-            "rssi": current_rssi
-        }
-        raw_packet_queue.put(raw_payload)
-    
-    # Procesamiento para monitorización clínica (método antiguo)
-    decoded = decode_packet_for_monitoring(data)
-    if not decoded:
-        return
-
-    spo2, hr = decoded
     spo2_hist.append(spo2)
     hr_hist.append(hr)
 
@@ -196,11 +121,13 @@ def handle_notification(sender, data):
     }
 
     data_queue.put(payload)
+    return jsonify({"status": "ok"}), 200
 
 # --------------------------------------------------
-# QUEUE PROCESSORS
+# QUEUE PROCESSOR
 # --------------------------------------------------
 def process_queue():
+    """Procesa cola de datos y los emite via WebSocket"""
     while not stop_event.is_set():
         try:
             data = data_queue.get(timeout=0.5)
@@ -209,115 +136,32 @@ def process_queue():
         except Empty:
             continue
 
-def process_raw_queue():
-    """Procesa y envía datos de diagnóstico de operaciones"""
-    while not stop_event.is_set():
-        try:
-            raw_data = raw_packet_queue.get(timeout=0.5)
-            socketio.emit("raw_update", raw_data)
-        except Empty:
-            continue
-
 # --------------------------------------------------
-# BLE LOOP (SISTEMA HÍBRIDO CON RECONEXIÓN INTELIGENTE)
+# WEBSOCKET EVENTS
 # --------------------------------------------------
-async def ble_connect():
-    global current_distance, current_rssi, rssi_update_count
-    
-    target_address = None  # Guardar dirección para reconexiones rápidas
-    
-    while not stop_event.is_set():
-        try:
-            # FASE 1: Escanear para obtener dispositivo y RSSI actualizado
-            print(f"[BLE] {'Escaneando' if not target_address else 'Actualizando RSSI'}...")
-            
-            target_device = None
-            target_rssi = None
-            
-            def detection_callback(device, advertisement_data):
-                nonlocal target_device, target_rssi
-                # Si ya tenemos una dirección guardada, buscar específicamente ese dispositivo
-                if target_address:
-                    if device.address == target_address:
-                        target_device = device
-                        target_rssi = advertisement_data.rssi
-                # Si es primera vez, buscar cualquier BerryMed
-                elif device.name and "BerryMed" in device.name:
-                    target_device = device
-                    target_rssi = advertisement_data.rssi
-            
-            scanner = BleakScanner(detection_callback=detection_callback)
-            await scanner.start()
-            
-            # Scan más corto si ya conocemos el dispositivo (optimización)
-            scan_duration = 2 if target_address else 5
-            await asyncio.sleep(scan_duration)
-            await scanner.stop()
+@socketio.on('connect')
+def handle_connect():
+    print('[WebSocket] Cliente conectado')
+    # Enviar últimos datos si existen
+    if len(spo2_hist) > 0 and len(hr_hist) > 0:
+        socketio.emit('update', {
+            "spo2": spo2_hist[-1],
+            "hr": hr_hist[-1],
+            "spo2_history": list(spo2_hist),
+            "hr_history": list(hr_hist),
+            "spo2_critical": spo2_hist[-1] < 90,
+            "hr_critical": hr_hist[-1] < 45 or hr_hist[-1] > 130
+        })
 
-            if not target_device:
-                if target_address:
-                    # Dispositivo conocido no encontrado, resetear y buscar de nuevo
-                    print("[BLE] ⚠️  Dispositivo perdido, buscando nuevamente...")
-                    target_address = None
-                else:
-                    print("[BLE] Dispositivo no encontrado, reintentando...")
-                await asyncio.sleep(3)
-                continue
-
-            # Guardar dirección para próximas reconexiones
-            target_address = target_device.address
-            
-            # Actualizar RSSI y distancia
-            current_rssi = target_rssi
-            rssi_buffer.append(current_rssi)
-            avg_rssi = sum(rssi_buffer) / len(rssi_buffer)
-            current_distance = calculate_distance(avg_rssi)
-            rssi_update_count += 1
-            
-            if rssi_update_count == 1:
-                print(f"[BLE] Dispositivo: {target_device.name} ({target_device.address})")
-                print(f"[BLE] Sistema híbrido activado (actualización cada {CONNECTION_DURATION}s)")
-            
-            print(f"[BLE] RSSI: {current_rssi} dBm | Distancia: {current_distance}m | Actualización #{rssi_update_count}")
-            
-            # FASE 2: Conectar y recibir datos vitales
-            async with BleakClient(target_device.address, timeout=15.0) as client_ble:
-                await client_ble.start_notify(SEND_CHAR_UUID, handle_notification)
-                await client_ble.write_gatt_char(RECV_CHAR_UUID, bytes([0xF1]), True)
-                
-                if rssi_update_count == 1:
-                    print("[BLE] ✅ Conectado - Monitorizando constantemente")
-                
-                # Mantener conexión durante CONNECTION_DURATION segundos
-                connection_start = time.time()
-                while client_ble.is_connected and not stop_event.is_set():
-                    elapsed = time.time() - connection_start
-                    if elapsed >= CONNECTION_DURATION:
-                        print(f"[BLE] Desconectando para actualizar RSSI...")
-                        break
-                    await asyncio.sleep(0.5)
-            
-            # Pequeña pausa antes de reconectar (permite que el dispositivo vuelva a advertising)
-            await asyncio.sleep(RECONNECTION_DELAY)
-
-        except asyncio.TimeoutError:
-            print(f"[BLE] Timeout en conexión, reintentando...")
-            await asyncio.sleep(2)
-        except Exception as e:
-            print(f"[BLE] Error: {e}")
-            # Si hay error repetido, resetear dirección guardada
-            target_address = None
-            current_distance = 0.0
-            current_rssi = None
-            await asyncio.sleep(5)
-
-def start_ble():
-    asyncio.run(ble_connect())
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('[WebSocket] Cliente desconectado')
 
 # --------------------------------------------------
 # CLINICAL ANALYSIS
 # --------------------------------------------------
 def classify_spo2_episodes(spo2, hr, threshold=92):
+    """Clasifica episodios de desaturación en clínicos vs artefactos"""
     MIN_SAMPLES = 30
     MIN_HR_VARIATION = 5
     
@@ -352,23 +196,29 @@ def classify_spo2_episodes(spo2, hr, threshold=92):
     return clinical, artifacts
 
 def load_raw_data():
+    """Carga datos históricos desde JSONL"""
     if not os.path.exists(JSON_PATH):
         return []
     
     data = []
-    with open(JSON_PATH) as f:
-        for line in f:
-            if line.strip():
-                try:
-                    entry = json.loads(line)
-                    if 'timestamp' in entry and 'timestamp_iso' not in entry:
-                        entry['timestamp_iso'] = entry['timestamp']
-                    data.append(entry)
-                except json.JSONDecodeError:
-                    continue
+    try:
+        with open(JSON_PATH) as f:
+            for line in f:
+                if line.strip():
+                    try:
+                        entry = json.loads(line)
+                        if 'timestamp' in entry and 'timestamp_iso' not in entry:
+                            entry['timestamp_iso'] = entry['timestamp']
+                        data.append(entry)
+                    except json.JSONDecodeError:
+                        continue
+    except OSError as e:
+        print(f"[WARN] No se pudo leer JSONL: {e}")
+    
     return data
 
 def process_data_for_analysis():
+    """Genera resumen estadístico de los datos"""
     data = load_raw_data()
     if not data:
         return None
@@ -393,9 +243,10 @@ def process_data_for_analysis():
     }
 
 # --------------------------------------------------
-# PROMPT
+# LLM PROMPT
 # --------------------------------------------------
 def generate_llm_prompt(summary, patient):
+    """Genera prompt para OpenAI con datos del paciente y resumen"""
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     return f"""Genera un informe médico profesional en HTML completo y válido.
@@ -434,10 +285,11 @@ Usa estilos CSS profesionales (colores suaves, tipografía clara). Devuelve SOLO
 """
 
 # --------------------------------------------------
-# API ENDPOINT
+# API ENDPOINT - INFORME PDF
 # --------------------------------------------------
 @app.route("/api/report/pdf", methods=["POST"])
 def api_report_pdf():
+    """Genera informe PDF usando OpenAI + WeasyPrint"""
     print("=== INICIO GENERACIÓN DE INFORME ===")
     
     try:
@@ -478,6 +330,7 @@ def api_report_pdf():
         if not html_content or not html_content.strip():
             raise ValueError("El LLM no devolvió contenido HTML válido")
 
+        # Limpiar markdown fences si existen
         html_content = html_content.strip()
         if html_content.startswith("```html"):
             html_content = html_content[7:]
@@ -516,18 +369,15 @@ def api_report_pdf():
 # --------------------------------------------------
 # MAIN
 # --------------------------------------------------
-def open_browser():
-    time.sleep(1.5)
-    webbrowser.open("http://127.0.0.1:5000")
-
 if __name__ == "__main__":
     print(f"\n{SYSTEM_NAME}")
     print(f"Versión: {ALGORITHM_VERSION}")
-    print(f"Modelo LLM: {LLM_MODEL}\n")
+    print(f"Modelo LLM: {LLM_MODEL}")
+    print(f"Modo: Producción Render (sin BLE)\n")
     
+    # Solo iniciar el procesador de cola
     threading.Thread(target=process_queue, daemon=True).start()
-    threading.Thread(target=process_raw_queue, daemon=True).start()
-    threading.Thread(target=start_ble, daemon=True).start()
-    threading.Thread(target=open_browser, daemon=True).start()
     
-    socketio.run(app, host="127.0.0.1", port=5000, debug=False)
+    # Render usa Gunicorn, pero este es para pruebas locales
+    port = int(os.environ.get("PORT", 5000))
+    socketio.run(app, host="0.0.0.0", port=port, debug=False)
