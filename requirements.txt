@@ -1,7 +1,11 @@
-Flask
-Flask-SocketIO
+flask
+flask-socketio
+python-socketio
+numpy
+weasyprint
+python-dotenv
+openai
 gunicorn
 eventlet
-numpy>=1.26
 
 
