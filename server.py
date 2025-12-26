@@ -5,6 +5,9 @@ Recibe datos del proxy HTTP (ESP32 Bridge)
 Sin dependencias BLE (Bleak)
 """
 
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import csv
 import json
@@ -71,16 +74,12 @@ def save_data(spo2, hr):
         print(f"[WARN] No se pudo escribir JSONL: {e}")
 
 # --------------------------------------------------
-# FLASK
+# SOCKET.IO / FLASK
 # --------------------------------------------------
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY")
 
-import eventlet
-eventlet.monkey_patch()
-
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
-
 
 @app.route("/")
 def index():
