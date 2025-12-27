@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-HumanS - Monitorización Vital Continua (Versión Render)
-Recibe datos del proxy HTTP (ESP32 Bridge)
-Sin dependencias BLE (Bleak)
+HumanS - Monitorización Vital Continua (Versión Render con Diagnóstico)
+Recibe datos del proxy HTTP (ESP32 Bridge) incluyendo métricas de diagnóstico
 """
 
 import eventlet
@@ -33,7 +32,7 @@ client = OpenAI()
 LLM_MODEL = "gpt-4o-mini"
 
 SYSTEM_NAME = "HumanS – Monitorización Vital Continua"
-ALGORITHM_VERSION = "1.0.3-render"
+ALGORITHM_VERSION = "1.0.4-render-diagnostics"
 
 # --------------------------------------------------
 # CONFIG
@@ -43,6 +42,12 @@ spo2_hist = deque(maxlen=MAX_HISTORY)
 hr_hist = deque(maxlen=MAX_HISTORY)
 data_queue = Queue()
 stop_event = threading.Event()
+
+# DIAGNÓSTICO DE OPERACIONES BLE
+packet_count = 0
+current_distance = 0.0
+current_rssi = None
+last_packet_time = None
 
 # --------------------------------------------------
 # DATA STORAGE
@@ -60,7 +65,6 @@ def save_data(spo2, hr):
     """Guarda datos en CSV y JSONL"""
     ts = datetime.now(timezone.utc).isoformat()
     
-    # Intentar escribir, pero no fallar si hay problemas (ej: Render filesystem)
     try:
         with open(CSV_PATH, "a", newline="") as f:
             csv.writer(f).writerow([ts, spo2, hr])
@@ -87,7 +91,12 @@ def index():
 
 @app.route("/api/data", methods=["POST"])
 def receive_data():
-    """Endpoint que recibe datos del proxy (ESP32 Bridge)"""
+    """
+    Endpoint que recibe datos del proxy (ESP32 Bridge)
+    Ahora acepta también datos de diagnóstico: distance, rssi, packet_count
+    """
+    global packet_count, current_distance, current_rssi, last_packet_time
+    
     # Validar API Key
     api_key = request.headers.get('x-api-key')
     expected_key = os.environ.get('API_KEY', 'f3b2a8d9c6e1f0a7d4b8c2e9f1a3b7d6')
@@ -112,9 +121,22 @@ def receive_data():
     if not (60 <= spo2 <= 100) or not (30 <= hr <= 220):
         return jsonify({"error": "Valores fuera de rango"}), 400
 
+    # Actualizar datos de monitorización
     spo2_hist.append(spo2)
     hr_hist.append(hr)
 
+    # PROCESAR DATOS DE DIAGNÓSTICO (si están presentes)
+    if 'distance' in data:
+        current_distance = data['distance']
+    
+    if 'rssi' in data:
+        current_rssi = data['rssi']
+    
+    # Incrementar contador de paquetes
+    packet_count += 1
+    last_packet_time = datetime.now()
+
+    # Preparar payload para monitorización
     payload = {
         "spo2": spo2,
         "hr": hr,
@@ -124,10 +146,34 @@ def receive_data():
         "hr_critical": hr < 45 or hr > 130
     }
 
+    # Preparar payload de diagnóstico
+    diagnostics_payload = {
+        "count": packet_count,
+        "distance": current_distance,
+        "rssi": current_rssi
+    }
+
     save_data(spo2, hr)
+    
+    # Emitir ambos eventos via WebSocket
     socketio.emit("update", payload)
+    socketio.emit("raw_update", diagnostics_payload)
 
     return jsonify({"status": "ok"}), 200
+
+# --------------------------------------------------
+# ENDPOINT DE DIAGNÓSTICO (opcional, para consultas)
+# --------------------------------------------------
+@app.route("/api/diagnostics", methods=["GET"])
+def get_diagnostics():
+    """Devuelve el estado actual de diagnóstico"""
+    return jsonify({
+        "packet_count": packet_count,
+        "distance": current_distance,
+        "rssi": current_rssi,
+        "last_packet": last_packet_time.isoformat() if last_packet_time else None,
+        "uptime_seconds": time.time() - app.config.get('start_time', time.time())
+    })
 
 # --------------------------------------------------
 # QUEUE PROCESSOR
@@ -148,7 +194,8 @@ def process_queue():
 @socketio.on('connect')
 def handle_connect():
     print('[WebSocket] Cliente conectado')
-    # Enviar últimos datos si existen
+    
+    # Enviar últimos datos de monitorización
     if len(spo2_hist) > 0 and len(hr_hist) > 0:
         socketio.emit('update', {
             "spo2": spo2_hist[-1],
@@ -158,6 +205,13 @@ def handle_connect():
             "spo2_critical": spo2_hist[-1] < 90,
             "hr_critical": hr_hist[-1] < 45 or hr_hist[-1] > 130
         })
+    
+    # Enviar últimos datos de diagnóstico
+    socketio.emit('raw_update', {
+        "count": packet_count,
+        "distance": current_distance,
+        "rssi": current_rssi
+    })
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -379,7 +433,10 @@ if __name__ == "__main__":
     print(f"\n{SYSTEM_NAME}")
     print(f"Versión: {ALGORITHM_VERSION}")
     print(f"Modelo LLM: {LLM_MODEL}")
-    print(f"Modo: Producción Render (sin BLE)\n")
+    print(f"Modo: Producción Render (con Diagnóstico BLE)\n")
+    
+    # Guardar tiempo de inicio para uptime
+    app.config['start_time'] = time.time()
     
     # Solo iniciar el procesador de cola
     threading.Thread(target=process_queue, daemon=True).start()
