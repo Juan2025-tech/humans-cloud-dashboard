@@ -651,8 +651,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 @app.route("/")
 def index():
-    return render_template("index.html")
-
+    return render_template("index11.html")
 
 # --------------------------------------------------
 # API - DATA INGESTION
