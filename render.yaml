@@ -1,0 +1,50 @@
+# render.yaml - HumanS Render Blueprint
+# Coloca este archivo en la raíz de tu repositorio
+# Render lo detectará automáticamente al conectar el repo
+
+services:
+  # Web Service - Aplicación Principal
+  - type: web
+    name: humans-server
+    runtime: python
+    plan: starter  # Cambia a 'free' para pruebas
+    
+    # Comandos
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT server_postgres_cloud:app
+    
+    # Health Check
+    healthCheckPath: /api/diagnostics
+    
+    # Variables de entorno
+    envVars:
+      # Base de datos (se conecta automáticamente)
+      - key: DATABASE_URL
+        fromDatabase:
+          name: humans-db
+          property: connectionString
+      
+      # OpenAI (configurar manualmente en Dashboard)
+      - key: OPENAI_API_KEY
+        sync: false
+      
+      # Email SMTP (configurar manualmente en Dashboard)
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_PASS
+        sync: false
+      - key: SMTP_SERVER
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "465"
+      
+      # Email destinatario opcional (se puede configurar desde la UI)
+      - key: EMAIL_TO
+        sync: false
+
+# Base de datos PostgreSQL
+databases:
+  - name: humans-db
+    plan: starter  # Cambia a 'free' para pruebas (expira en 90 días)
+    databaseName: humans
+    user: humans_user

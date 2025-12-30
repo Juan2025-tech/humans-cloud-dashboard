@@ -1,11 +1,27 @@
-flask
-flask-socketio
-python-socketio
-numpy
-weasyprint
-python-dotenv
-openai
-gunicorn
-eventlet
+# HumanS - Monitorización Vital Continua
+# Requirements para Render (Python 3.11+)
+
+# Web Framework
+flask>=2.3.0
+flask-socketio>=5.3.0
+
+# WSGI Server con soporte WebSocket
+gunicorn>=21.0.0
+eventlet>=0.33.0
+
+# Base de datos PostgreSQL
+psycopg2-binary>=2.9.0
+
+# Variables de entorno
+python-dotenv>=1.0.0
+
+# OpenAI para reportes
+openai>=1.0.0
+
+# Generación de PDF
+weasyprint>=60.0
+
+# Procesamiento numérico
+numpy>=1.24.0
 
 
