@@ -11,6 +11,10 @@ Basado en el Protocolo Berry v1.5:
 - Byte6: PulseRate (Frecuencia cardíaca promedio) - Rango válido: 25-250 bpm
 """
 
+# IMPORTANTE: Monkey patch ANTES de cualquier otro import
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import time
 import threading

@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>HumanS – Monitor Vital (AI Report + Alertas Email)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    body { font-family: "Segoe UI", sans-serif; background:#eef2f7; margin:0; padding:0; -webkit-font-smoothing:antialiased; }
+    .container { max-width:900px; margin:24px auto; padding:20px; background:#eaf6ff; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.08); }
+    h1 { text-align:center; color:#123e66; margin:0 0 8px; }
+    h2 { text-align:center; color:#123e66; margin:24px 0 12px; font-size:1.4em; }
+
+    .status { display:inline-block; text-align:center; margin:10px auto; padding:6px 14px; border-radius:8px; font-weight:700; }
+    .connected { background:white; color:#155724; border: 2px solid #155724; }
+    .disconnected { background:white; color:#c92a2a; border:2px solid #c92a2a; }
+
+    .top-row { display:flex; gap:20px; align-items:center; justify-content:center; margin-top:12px; }
+    .big { text-align:center; min-width:160px; }
+    .label { font-weight:600; color:#34495e; margin-bottom:6px; }
+    .value { font-family:"Courier New", monospace; font-size:84px; font-weight:800; }
+    .value.good { color:#27ae60; }
+    .value.warn { color:#e74c3c; }
+
+    .patient-box { margin:14px auto; background: rgba(255,255,255,0.8); padding:12px; border-radius:8px; text-align:left; width:92%; box-shadow:0 6px 18px rgba(0,0,0,0.04); }
+    .patient-box input { padding: 5px 8px; margin: 0 4px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+    .patient-box input.email-input { width: 220px; }
+    .patient-box label { font-weight: 600; color: #34495e; margin-right: 6px; }
+    
+    canvas { width:100% !important; height:320px !important; display:block; }
+
+    .controls { text-align:center; margin-top:12px; }
+    .btn { padding:8px 14px; border-radius:8px; border:none; cursor:pointer; background:#1c70d6; color:white; font-weight:700; margin:6px 6px; }
+    .btn.secondary { background:#6c757d; }
+    .btn.predict { background:#28a745; }
+    .btn.email-btn { background:#dc3545; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .alerting { box-shadow:0 0 0 8px rgba(231,76,60,0.10); border-radius:12px; animation: pulse 1s infinite; }
+    @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(231,76,60,0.0);} 50% { box-shadow:0 0 0 12px rgba(231,76,60,0.12);} 100% { box-shadow:0 0 0 0 rgba(231,76,60,0.0);} }
+
+    #loadingBox { margin-top:18px; padding:14px; background:white; border-radius:10px; display:none; text-align:center; box-shadow:0 6px 22px rgba(0,0,0,0.06); }
+    .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #1c70d6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+    /* SECCIÓN DE ALERTAS EMAIL */
+    .alert-config-section { 
+      margin-top:20px; 
+      padding:16px; 
+      background: linear-gradient(135deg, #fff5f5 0%, #ffe8e8 100%);
+      border-radius:10px; 
+      box-shadow:0 6px 18px rgba(0,0,0,0.06);
+      border-left: 4px solid #dc3545;
+    }
+    .alert-config-section h2 { 
+      margin: 0 0 12px 0; 
+      color: #dc3545;
+      text-align: left;
+      font-size: 1.2em;
+    }
+    .alert-config-grid {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+    }
+    .email-status {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 0.85em;
+      font-weight: 600;
+    }
+    .email-status.active { background: #d4edda; color: #155724; }
+    .email-status.inactive { background: #f8d7da; color: #721c24; }
+    .threshold-info {
+      margin-top: 12px;
+      padding: 10px;
+      background: rgba(255,255,255,0.7);
+      border-radius: 6px;
+      font-size: 0.85em;
+      color: #495057;
+    }
+    .threshold-info strong { color: #dc3545; }
+
+    /* DIAGNÓSTICO DE OPERACIONES */
+    .diagnostics-section { margin-top:24px; padding:16px; background:rgba(255,255,255,0.9); border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,0.06); }
+    .diagnostics-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-top:12px; }
+    .diag-card { padding:10px; background:#f8f9fa; border-radius:6px; border-left:4px solid #1c70d6; }
+    .diag-card .diag-label { font-size:0.85em; color:#6c757d; font-weight:600; margin-bottom:4px; }
+    .diag-card .diag-value { font-size:1.8em; font-weight:700; color:#123e66; font-family:"Courier New", monospace; }
+
+    /* Toast notification */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 16px 24px;
+      background: #28a745;
+      color: white;
+      border-radius: 8px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      transform: translateY(100px);
+      opacity: 0;
+      transition: all 0.3s ease;
+      z-index: 1000;
+      font-weight: 600;
+    }
+    .toast.show { transform: translateY(0); opacity: 1; }
+    .toast.error { background: #dc3545; }
+
+    @media (max-width:768px) {
+      .value { font-size:56px; }
+      .patient-box input { font-size: 12px; padding: 3px 6px; }
+      .patient-box input.email-input { width: 180px; }
+      .diagnostics-grid { grid-template-columns: 1fr; }
+      .alert-config-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width:520px) {
+      .diagnostics-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container" id="mainCard">
+    <h1>HumanS – Monitor Vital (AI Report)</h1>
+    <div id="status" class="status disconnected">Conectando...</div>
+
+    <!-- DATOS DEL PACIENTE -->
+    <div class="patient-box">
+      <div>
+        <label>Paciente:</label>
+        <input type="text" id="patientName" value="Paciente01" placeholder="Nombre del paciente">
+        &nbsp;&nbsp;
+        <label>Edad:</label>
+        <input type="number" id="patientAge" value="81" placeholder="Edad" style="width: 60px;">
+        años
+      </div>
+      <div style="margin-top: 8px;">
+        <label>Residencia:</label>
+        <input type="text" id="patientResidence" value="Residencia Albareda" placeholder="Residencia">
+        &nbsp;&nbsp;
+        <label>Habitación:</label>
+        <input type="text" id="patientRoom" value="101" placeholder="Habitación" style="width: 80px;">
+      </div>
+    </div>
+
+    <div class="top-row">
+      <div class="big">
+        <div class="label">SpO₂ (%)</div>
+        <div id="spo2" class="value">--</div>
+      </div>
+
+      <div class="big">
+        <div class="label">HR (bpm)</div>
+        <div id="hr" class="value">--</div>
+      </div>
+    </div>
+
+    <canvas id="dualChart"></canvas>
+
+    <div class="controls">
+      <button id="pauseBtn" class="btn secondary">Pausar</button>
+      <button id="clearBtn" class="btn">Borrar historial</button>
+      <button id="reportBtn" class="btn predict">Informe médico (PDF)</button>
+    </div>
+
+    <div id="loadingBox">
+      <div class="spinner"></div>
+      <p>Generando informe médico con IA...</p>
+    </div>
+
+    <!-- SECCIÓN DE CONFIGURACIÓN DE ALERTAS EMAIL -->
+    <div class="alert-config-section">
+      <h2>📧 Configuración de Alertas por Email</h2>
+      
+      <div class="alert-config-grid">
+        <div>
+          <label for="alertEmail">Email de notificación:</label>
+          <input type="email" id="alertEmail" class="email-input" 
+                 placeholder="correo@ejemplo.com" 
+                 value="">
+        </div>
+        <div>
+          <button id="saveEmailBtn" class="btn email-btn">💾 Guardar Email</button>
+          <button id="testEmailBtn" class="btn secondary">📤 Probar</button>
+        </div>
+      </div>
+      
+      <div style="margin-top: 10px;">
+        <span class="email-status inactive" id="emailStatus">❌ No configurado</span>
+        <span id="currentEmailDisplay" style="margin-left: 10px; color: #6c757d; font-size: 0.9em;"></span>
+      </div>
+
+      <div class="threshold-info">
+        <strong>⚠️ Umbrales de alerta:</strong> 
+        Se enviará un email cuando SpO₂ < <strong id="thresholdSpo2">92</strong>% 
+        o cuando HR < <strong id="thresholdHrLow">60</strong> 
+        o HR > <strong id="thresholdHrHigh">150</strong> bpm.
+        <br>
+        <small>El email incluirá los datos del paciente, valores actuales y una tabla con las estadísticas de la sesión.</small>
+      </div>
+    </div>
+
+    <!-- SECCIÓN DE DIAGNÓSTICO DE OPERACIONES -->
+    <div class="diagnostics-section">
+      <h2>🔧 Diagnóstico de Operaciones BLE</h2>
+      
+      <div class="diagnostics-grid">
+        <div class="diag-card">
+          <div class="diag-label">Paquetes Recibidos</div>
+          <div class="diag-value" id="packetCount">0</div>
+        </div>
+        
+        <div class="diag-card" style="border-left-color: #28a745;">
+          <div class="diag-label">Distancia (metros)</div>
+          <div class="diag-value" id="distance">--</div>
+        </div>
+        
+        <div class="diag-card" style="border-left-color: #ffc107;">
+          <div class="diag-label">RSSI (dBm)</div>
+          <div class="diag-value" id="rssi">--</div>
+        </div>
+      </div>
+      
+      <div style="margin-top:12px; padding:10px; background:#e7f3ff; border-radius:6px; font-size:0.85em; color:#123e66;">
+        <strong>ℹ️ Información:</strong> La distancia se calcula basándose en la intensidad de señal RSSI. 
+        Valores típicos: &lt;1m (excelente) | 1-3m (bueno) | &gt;3m (débil).
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast"></div>
+
+  <script>
+    window.addEventListener('error', (ev) => console.error('Error:', ev.message));
+
+    // Toast notification function
+    function showToast(message, isError = false) {
+      const toast = document.getElementById('toast');
+      toast.textContent = message;
+      toast.className = 'toast' + (isError ? ' error' : '');
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 3000);
+    }
+
+    // Socket connection
+    let socket = null;
+    try {
+      socket = typeof io !== 'undefined' ? io() : {
+        on: (e, cb) => console.log('[fallback] on', e),
+        emit: (e, p) => console.log('[fallback] emit', e, p)
+      };
+    } catch (e) {
+      console.warn('socket.io fallback:', e);
+      socket = { on: () => {}, emit: () => {} };
+    }
+
+    // Chart configuration
+    let dualChart = null;
+    try {
+      const ctx = document.getElementById('dualChart').getContext('2d');
+      dualChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [
+            { label: 'SpO₂', data: [], borderColor: '#0074D9', tension: 0.2, yAxisID: 'y' },
+            { label: 'HR', data: [], borderColor: '#FF4136', tension: 0.2, yAxisID: 'y1' }
+          ]
+        },
+        options: {
+          animation: false,
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            y: { type: 'linear', position: 'left', min: 60, max: 100, title: { display: true, text: 'SpO₂ %' } },
+            y1: { type: 'linear', position: 'right', min: 30, max: 180, grid: { drawOnChartArea: false }, title: { display: true, text: 'HR bpm' } }
+          }
+        }
+      });
+    } catch (e) {
+      console.warn('Chart.js fallback:', e);
+    }
+
+    // Pause and clear controls
+    let paused = false;
+    document.getElementById('pauseBtn').onclick = () => {
+      paused = !paused;
+      document.getElementById('pauseBtn').textContent = paused ? 'Reanudar' : 'Pausar';
+    };
+
+    document.getElementById('clearBtn').onclick = () => {
+      if (dualChart) {
+        dualChart.data.labels = [];
+        dualChart.data.datasets[0].data = [];
+        dualChart.data.datasets[1].data = [];
+        dualChart.update();
+      }
+      document.getElementById('spo2').textContent = '--';
+      document.getElementById('hr').textContent = '--';
+    };
+
+    // Audio alerts
+    let audioCtx = null;
+    function playAlertBeep(repeat = 1) {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        for (let i = 0; i < repeat; i++) {
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = 'sine';
+          o.frequency.value = 900;
+          g.gain.value = 0.12;
+          o.connect(g);
+          g.connect(audioCtx.destination);
+          const start = window.performance.now() + i * 250;
+          o.start(start / 1000);
+          setTimeout(() => { try { o.stop(); } catch (e) {} }, 520 + i * 250);
+        }
+      } catch (e) {
+        console.log('Audio error:', e);
+      }
+    }
+
+    const mainCard = document.getElementById('mainCard');
+    function setAlertOn(on) {
+      on ? mainCard.classList.add('alerting') : mainCard.classList.remove('alerting');
+    }
+
+    // =====================================================
+    // EMAIL CONFIGURATION
+    // =====================================================
+    const alertEmailInput = document.getElementById('alertEmail');
+    const saveEmailBtn = document.getElementById('saveEmailBtn');
+    const testEmailBtn = document.getElementById('testEmailBtn');
+    const emailStatus = document.getElementById('emailStatus');
+    const currentEmailDisplay = document.getElementById('currentEmailDisplay');
+
+    // Load saved email from localStorage
+    function loadSavedEmail() {
+      const savedEmail = localStorage.getItem('alertEmail');
+      if (savedEmail) {
+        alertEmailInput.value = savedEmail;
+        updateEmailStatus(savedEmail);
+      }
+      // Also fetch current config from server
+      fetchEmailConfig();
+    }
+
+    // Fetch email configuration from server
+    async function fetchEmailConfig() {
+      try {
+        const response = await fetch('/api/email/config');
+        if (response.ok) {
+          const data = await response.json();
+          if (data.email_to) {
+            alertEmailInput.value = data.email_to;
+            localStorage.setItem('alertEmail', data.email_to);
+            updateEmailStatus(data.email_to);
+          }
+          // Update thresholds display
+          if (data.thresholds) {
+            document.getElementById('thresholdSpo2').textContent = data.thresholds.spo2_critical || 92;
+            document.getElementById('thresholdHrLow').textContent = data.thresholds.hr_low || 60;
+            document.getElementById('thresholdHrHigh').textContent = data.thresholds.hr_high || 150;
+          }
+        }
+      } catch (e) {
+        console.warn('Could not fetch email config:', e);
+      }
+    }
+
+    // Update email status display
+    function updateEmailStatus(email) {
+      if (email && email.includes('@')) {
+        emailStatus.className = 'email-status active';
+        emailStatus.textContent = '✅ Configurado';
+        currentEmailDisplay.textContent = `→ ${email}`;
+      } else {
+        emailStatus.className = 'email-status inactive';
+        emailStatus.textContent = '❌ No configurado';
+        currentEmailDisplay.textContent = '';
+      }
+    }
+
+    // Validate email format
+    function isValidEmail(email) {
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    }
+
+    // Save email to server
+    saveEmailBtn.addEventListener('click', async () => {
+      const email = alertEmailInput.value.trim();
+      
+      if (!email) {
+        showToast('Por favor, introduce un email', true);
+        return;
+      }
+      
+      if (!isValidEmail(email)) {
+        showToast('Formato de email inválido', true);
+        return;
+      }
+
+      saveEmailBtn.disabled = true;
+      saveEmailBtn.textContent = '⏳ Guardando...';
+
+      try {
+        const response = await fetch('/api/email/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            email_to: email,
+            patient_name: document.getElementById('patientName').value,
+            patient_room: document.getElementById('patientRoom').value,
+            patient_residence: document.getElementById('patientResidence').value
+          })
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+          localStorage.setItem('alertEmail', email);
+          updateEmailStatus(email);
+          showToast('✅ Email guardado correctamente');
+        } else {
+          showToast(result.error || 'Error al guardar', true);
+        }
+      } catch (error) {
+        console.error('Error saving email:', error);
+        showToast('Error de conexión', true);
+      } finally {
+        saveEmailBtn.disabled = false;
+        saveEmailBtn.textContent = '💾 Guardar Email';
+      }
+    });
+
+    // Test email
+    testEmailBtn.addEventListener('click', async () => {
+      const email = alertEmailInput.value.trim();
+      
+      if (!email || !isValidEmail(email)) {
+        showToast('Primero guarda un email válido', true);
+        return;
+      }
+
+      testEmailBtn.disabled = true;
+      testEmailBtn.textContent = '⏳ Enviando...';
+
+      try {
+        const response = await fetch('/api/email/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            email_to: email,
+            patient_name: document.getElementById('patientName').value
+          })
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+          showToast(`✅ Email de prueba enviado a ${email}`);
+        } else {
+          showToast(result.error || 'Error al enviar', true);
+        }
+      } catch (error) {
+        console.error('Error testing email:', error);
+        showToast('Error de conexión', true);
+      } finally {
+        testEmailBtn.disabled = false;
+        testEmailBtn.textContent = '📤 Probar';
+      }
+    });
+
+    // Load email config on page load
+    loadSavedEmail();
+
+    // =====================================================
+    // SOCKET EVENTS
+    // =====================================================
+    
+    // Normal monitoring update
+    socket.on('update', data => {
+      if (paused) return;
+      try {
+        const spo2El = document.getElementById('spo2');
+        const hrEl = document.getElementById('hr');
+        spo2El.textContent = data.spo2 ?? '--';
+        hrEl.textContent = data.hr ?? '--';
+        spo2El.className = 'value ' + (data.spo2_critical ? 'warn' : 'good');
+        hrEl.className = 'value ' + (data.hr_critical ? 'warn' : 'good');
+
+        if (dualChart && data.spo2_history && data.hr_history) {
+          const labels = data.spo2_history.map((_, i) => i);
+          dualChart.data.labels = labels;
+          dualChart.data.datasets[0].data = data.spo2_history;
+          dualChart.data.datasets[1].data = data.hr_history;
+          dualChart.update();
+        }
+
+        if (data.spo2_critical || data.hr_critical) {
+          setAlertOn(true);
+          playAlertBeep();
+        } else {
+          setAlertOn(false);
+        }
+      } catch (e) {
+        console.warn('Error update:', e);
+      }
+    });
+
+    // Diagnostics update
+    socket.on('raw_update', data => {
+      try {
+        document.getElementById('packetCount').textContent = data.count || 0;
+        
+        const distanceEl = document.getElementById('distance');
+        if (data.distance !== undefined && data.distance !== null) {
+          distanceEl.textContent = data.distance + 'm';
+          
+          const card = distanceEl.closest('.diag-card');
+          if (data.distance < 1) {
+            card.style.borderLeftColor = '#28a745';
+          } else if (data.distance < 3) {
+            card.style.borderLeftColor = '#ffc107';
+          } else {
+            card.style.borderLeftColor = '#dc3545';
+          }
+        } else {
+          distanceEl.textContent = '--';
+        }
+        
+        const rssiEl = document.getElementById('rssi');
+        if (data.rssi !== undefined && data.rssi !== null) {
+          rssiEl.textContent = data.rssi;
+        } else {
+          rssiEl.textContent = '--';
+        }
+      } catch (e) {
+        console.warn('Error raw_update:', e);
+      }
+    });
+
+    // Alert sent notification
+    socket.on('alert_sent', data => {
+      showToast(`📧 Alerta enviada: ${data.type} - ${data.message}`);
+    });
+
+    socket.on('connect', () => {
+      const st = document.getElementById('status');
+      st.textContent = "Conectado";
+      st.className = "status connected";
+      // Refresh email config on reconnect
+      fetchEmailConfig();
+    });
+
+    socket.on('disconnect', () => {
+      const st = document.getElementById('status');
+      st.textContent = "Desconectado";
+      st.className = "status disconnected";
+    });
+
+    // =====================================================
+    // PDF REPORT GENERATION
+    // =====================================================
+    const reportBtn = document.getElementById('reportBtn');
+    const loadingBox = document.getElementById('loadingBox');
+
+    reportBtn.addEventListener('click', async () => {
+      reportBtn.disabled = true;
+      loadingBox.style.display = 'block';
+
+      try {
+        const patientData = {
+          name: document.getElementById('patientName').value || 'No especificado',
+          age: document.getElementById('patientAge').value || 'No especificado',
+          residence: document.getElementById('patientResidence').value || 'No especificado',
+          room: document.getElementById('patientRoom').value || 'No especificado'
+        };
+
+        console.log('[INFO] Enviando solicitud con datos:', patientData);
+
+        const response = await fetch('/api/report/pdf', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patientData)
+        });
+
+        if (response.ok) {
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `informe_medico_${new Date().toISOString().slice(0, 10)}.pdf`;
+          document.body.appendChild(a);
+          a.click();
+          window.URL.revokeObjectURL(url);
+          a.remove();
+          showToast('✅ Informe médico descargado');
+        } else {
+          const errorText = await response.text();
+          console.error('[ERROR] Respuesta del servidor:', errorText);
+          showToast('Error al generar el informe', true);
+        }
+      } catch (error) {
+        console.error('[ERROR] Excepción:', error);
+        showToast(`Error de conexión: ${error.message}`, true);
+      } finally {
+        reportBtn.disabled = false;
+        loadingBox.style.display = 'none';
+      }
+    });
+  </script>
+</body>
+</html>
