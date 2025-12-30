@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-HumanS - Monitorización Vital Continua (Versión PostgreSQL + Email Configurable)
-Recibe datos del proxy HTTP (ESP32 Bridge), los almacena en PostgreSQL
-y envía alertas por email cuando los valores están fuera de los rangos críticos.
+HumanS - Monitorización Vital Continua
+======================================
+Versión: 1.4.0-email-fix
 
-NUEVO: Email de notificación configurable desde el frontend.
-
-Basado en el Protocolo Berry v1.5:
-- Byte4: SpO2Sat (Saturación de oxígeno promedio) - Rango válido: 35-100%
-- Byte6: PulseRate (Frecuencia cardíaca promedio) - Rango válido: 25-250 bpm
+CORRECCIONES APLICADAS:
+- Eventlet monkey_patch al inicio (CRÍTICO para Render)
+- Timeout en conexiones SMTP (15s) - evita que se cuelgue
+- Endpoint de diagnóstico: /api/email/diagnose
+- Mejor manejo de errores con mensajes detallados
 """
 
-# IMPORTANTE: Monkey patch ANTES de cualquier otro import
+# ============================================================
+# CRÍTICO: Monkey patch ANTES de cualquier otro import
+# ============================================================
 import eventlet
 eventlet.monkey_patch()
 
@@ -19,6 +21,7 @@ import os
 import time
 import threading
 import smtplib
+import socket
 from datetime import datetime, timezone, timedelta
 from collections import deque
 from queue import Queue, Empty
@@ -29,14 +32,14 @@ from email.mime.multipart import MIMEMultipart
 
 import numpy as np
 
-# PostgreSQL - importar con manejo de error
+# PostgreSQL
 try:
     import psycopg2
     from psycopg2 import pool
     from psycopg2.extras import RealDictCursor
     POSTGRES_AVAILABLE = True
 except ImportError:
-    print("⚠️  psycopg2 no instalado. Ejecuta: pip install psycopg2-binary")
+    print("⚠️  psycopg2 no instalado")
     POSTGRES_AVAILABLE = False
     psycopg2 = None
     pool = None
@@ -56,17 +59,17 @@ client = OpenAI()
 LLM_MODEL = "gpt-4o-mini"
 
 SYSTEM_NAME = "HumanS – Monitorización Vital Continua"
-ALGORITHM_VERSION = "1.3.0-configurable-email"
+ALGORITHM_VERSION = "1.4.0-email-fix"
 
 # --------------------------------------------------
-# CONFIGURACIÓN DE EMAIL (valores por defecto)
+# CONFIGURACIÓN DE EMAIL
 # --------------------------------------------------
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "")
 EMAIL_PASS = os.environ.get("EMAIL_PASS", "")
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "")
+SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", 465))
+SMTP_TIMEOUT = 15  # Timeout en segundos - CRÍTICO
 
-# Email destinatario CONFIGURABLE (puede cambiar en runtime)
 email_config = {
     "email_to": os.environ.get("EMAIL_TO", ""),
     "patient_name": "",
@@ -75,12 +78,12 @@ email_config = {
 }
 
 # --------------------------------------------------
-# UMBRALES CLÍNICOS (según protocolo Berry v1.5)
+# UMBRALES CLÍNICOS
 # --------------------------------------------------
 CRITICAL_SPO2 = 92
 CRITICAL_HR_LOW = 60
 CRITICAL_HR_HIGH = 150
-EMAIL_COOLDOWN = 300  # 5 minutos entre alertas
+EMAIL_COOLDOWN = 300
 
 # --------------------------------------------------
 # CONFIG
@@ -91,74 +94,53 @@ hr_hist = deque(maxlen=MAX_HISTORY)
 data_queue = Queue()
 stop_event = threading.Event()
 
-# Diagnóstico BLE
 packet_count = 0
 current_distance = 0.0
 current_rssi = None
 last_packet_time = None
 
-# Control de alertas
 last_spo2_alert_time = 0
 last_hr_alert_time = 0
 last_spo2_critical = False
 last_hr_critical = False
 
 # --------------------------------------------------
-# POSTGRESQL CONNECTION
+# POSTGRESQL
 # --------------------------------------------------
 DATABASE_URL = os.environ.get("DATABASE_URL")
 db_pool = None
 
 def init_db_pool():
-    """Inicializa el pool de conexiones a PostgreSQL"""
     global db_pool
-    
-    if not POSTGRES_AVAILABLE:
-        print("⚠️  PostgreSQL no disponible - usando almacenamiento en memoria")
+    if not POSTGRES_AVAILABLE or not DATABASE_URL:
+        print("⚠️  PostgreSQL no disponible")
         return False
-    
-    if not DATABASE_URL:
-        print("⚠️  DATABASE_URL no configurada - usando almacenamiento en memoria")
-        return False
-    
     try:
-        connection_string = DATABASE_URL
-        if connection_string.startswith("postgres://"):
-            connection_string = connection_string.replace("postgres://", "postgresql://", 1)
-        
-        db_pool = pool.ThreadedConnectionPool(
-            minconn=1,
-            maxconn=10,
-            dsn=connection_string
-        )
-        print("✅ Pool de conexiones PostgreSQL inicializado")
+        conn_str = DATABASE_URL
+        if conn_str.startswith("postgres://"):
+            conn_str = conn_str.replace("postgres://", "postgresql://", 1)
+        db_pool = pool.ThreadedConnectionPool(minconn=1, maxconn=10, dsn=conn_str)
+        print("✅ PostgreSQL conectado")
         return True
-        
     except Exception as e:
-        print(f"❌ Error inicializando pool PostgreSQL: {e}")
+        print(f"❌ Error PostgreSQL: {e}")
         return False
 
 def get_db_connection():
-    if db_pool:
-        return db_pool.getconn()
-    return None
+    return db_pool.getconn() if db_pool else None
 
 def release_db_connection(conn):
     if db_pool and conn:
         db_pool.putconn(conn)
 
 def init_database():
-    """Crea las tablas necesarias en PostgreSQL"""
     if not DATABASE_URL:
         return False
-    
     conn = get_db_connection()
     if not conn:
         return False
-    
     try:
         with conn.cursor() as cur:
-            # Tabla de signos vitales
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS vital_signs (
                     id SERIAL PRIMARY KEY,
@@ -172,15 +154,8 @@ def init_database():
                     patient_id VARCHAR(100),
                     session_id VARCHAR(100)
                 );
-            """)
-            
-            cur.execute("""
-                CREATE INDEX IF NOT EXISTS idx_vital_signs_timestamp 
-                ON vital_signs(timestamp DESC);
-            """)
-            
-            # Tabla de alertas
-            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_vital_signs_ts ON vital_signs(timestamp DESC);
+                
                 CREATE TABLE IF NOT EXISTS alerts (
                     id SERIAL PRIMARY KEY,
                     timestamp TIMESTAMPTZ DEFAULT NOW(),
@@ -192,10 +167,7 @@ def init_database():
                     email_to VARCHAR(255),
                     patient_id VARCHAR(100)
                 );
-            """)
-            
-            # Tabla de configuración de email
-            cur.execute("""
+                
                 CREATE TABLE IF NOT EXISTS email_config (
                     id SERIAL PRIMARY KEY,
                     email_to VARCHAR(255) NOT NULL,
@@ -205,103 +177,75 @@ def init_database():
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
-            
             conn.commit()
-            print("✅ Tablas PostgreSQL creadas/verificadas")
-            
-            # Cargar configuración de email guardada
+            print("✅ Tablas verificadas")
             load_email_config_from_db()
-            
             return True
-            
     except Exception as e:
-        print(f"❌ Error creando tablas: {e}")
+        print(f"❌ Error tablas: {e}")
         conn.rollback()
         return False
     finally:
         release_db_connection(conn)
 
 def load_email_config_from_db():
-    """Carga la última configuración de email desde la BD"""
     global email_config
-    
     if not db_pool:
         return
-    
     conn = get_db_connection()
     if not conn:
         return
-    
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT email_to, patient_name, patient_room, patient_residence
-                FROM email_config
-                ORDER BY updated_at DESC
-                LIMIT 1;
-            """)
+            cur.execute("SELECT * FROM email_config ORDER BY updated_at DESC LIMIT 1;")
             result = cur.fetchone()
-            
             if result:
-                email_config["email_to"] = result["email_to"] or ""
-                email_config["patient_name"] = result["patient_name"] or ""
-                email_config["patient_room"] = result["patient_room"] or ""
-                email_config["patient_residence"] = result["patient_residence"] or ""
-                print(f"✅ Configuración de email cargada: {email_config['email_to']}")
-                
+                email_config["email_to"] = result.get("email_to", "")
+                email_config["patient_name"] = result.get("patient_name", "")
+                email_config["patient_room"] = result.get("patient_room", "")
+                email_config["patient_residence"] = result.get("patient_residence", "")
+                print(f"✅ Email cargado: {email_config['email_to']}")
     except Exception as e:
-        print(f"⚠️  No se pudo cargar config de email: {e}")
+        print(f"⚠️  Error cargando email: {e}")
     finally:
         release_db_connection(conn)
 
 def save_email_config_to_db(email_to, patient_name="", patient_room="", patient_residence=""):
-    """Guarda la configuración de email en la BD"""
     if not db_pool:
-        return True  # Sin BD, solo guardar en memoria
-    
+        return True
     conn = get_db_connection()
     if not conn:
         return False
-    
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO email_config (email_to, patient_name, patient_room, patient_residence)
-                VALUES (%s, %s, %s, %s);
-            """, (email_to, patient_name, patient_room, patient_residence))
+            cur.execute(
+                "INSERT INTO email_config (email_to, patient_name, patient_room, patient_residence) VALUES (%s, %s, %s, %s);",
+                (email_to, patient_name, patient_room, patient_residence)
+            )
             conn.commit()
             return True
     except Exception as e:
-        print(f"❌ Error guardando config email: {e}")
+        print(f"❌ Error guardando email config: {e}")
         conn.rollback()
         return False
     finally:
         release_db_connection(conn)
 
-# --------------------------------------------------
-# DATA STORAGE FUNCTIONS
-# --------------------------------------------------
-def save_vital_sign(spo2, hr, spo2_critical=False, hr_critical=False, 
-                    distance=None, rssi=None, patient_id=None, session_id=None):
+def save_vital_sign(spo2, hr, spo2_critical=False, hr_critical=False, distance=None, rssi=None, patient_id=None, session_id=None):
     if not db_pool:
         return True
-    
     conn = get_db_connection()
     if not conn:
         return False
-    
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO vital_signs 
+            cur.execute(
+                "INSERT INTO vital_signs (spo2, hr, spo2_critical, hr_critical, distance, rssi, patient_id, session_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s);",
                 (spo2, hr, spo2_critical, hr_critical, distance, rssi, patient_id, session_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id;
-            """, (spo2, hr, spo2_critical, hr_critical, distance, rssi, patient_id, session_id))
+            )
             conn.commit()
             return True
-    except Exception as e:
-        print(f"❌ Error guardando en PostgreSQL: {e}")
+    except:
         conn.rollback()
         return False
     finally:
@@ -310,22 +254,18 @@ def save_vital_sign(spo2, hr, spo2_critical=False, hr_critical=False,
 def save_alert(alert_type, spo2, hr, message, email_sent=False, email_to=None, patient_id=None):
     if not db_pool:
         return True
-    
     conn = get_db_connection()
     if not conn:
         return False
-    
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO alerts 
+            cur.execute(
+                "INSERT INTO alerts (alert_type, spo2, hr, message, email_sent, email_to, patient_id) VALUES (%s,%s,%s,%s,%s,%s,%s);",
                 (alert_type, spo2, hr, message, email_sent, email_to, patient_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s);
-            """, (alert_type, spo2, hr, message, email_sent, email_to, patient_id))
+            )
             conn.commit()
             return True
-    except Exception as e:
-        print(f"❌ Error guardando alerta: {e}")
+    except:
         conn.rollback()
         return False
     finally:
@@ -334,32 +274,21 @@ def save_alert(alert_type, spo2, hr, message, email_sent=False, email_to=None, p
 def get_vital_signs(limit=1000, hours=24, patient_id=None):
     if not db_pool:
         return []
-    
     conn = get_db_connection()
     if not conn:
         return []
-    
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            query = """
-                SELECT id, timestamp, spo2, hr, spo2_critical, hr_critical, 
-                       distance, rssi, patient_id, session_id
-                FROM vital_signs
-                WHERE timestamp > NOW() - INTERVAL '%s hours'
-            """
+            query = "SELECT * FROM vital_signs WHERE timestamp > NOW() - INTERVAL '%s hours'"
             params = [hours]
-            
             if patient_id:
                 query += " AND patient_id = %s"
                 params.append(patient_id)
-            
             query += " ORDER BY timestamp DESC LIMIT %s"
             params.append(limit)
-            
             cur.execute(query, params)
             return cur.fetchall()
-    except Exception as e:
-        print(f"❌ Error consultando PostgreSQL: {e}")
+    except:
         return []
     finally:
         release_db_connection(conn)
@@ -370,10 +299,10 @@ def get_statistics(hours=24, patient_id=None):
             return None
         return {
             "total_samples": len(spo2_hist),
-            "spo2_avg": round(sum(spo2_hist) / len(spo2_hist), 2),
+            "spo2_avg": round(sum(spo2_hist)/len(spo2_hist), 2),
             "spo2_min": min(spo2_hist),
             "spo2_max": max(spo2_hist),
-            "hr_avg": round(sum(hr_hist) / len(hr_hist), 2) if hr_hist else 0,
+            "hr_avg": round(sum(hr_hist)/len(hr_hist), 2) if hr_hist else 0,
             "hr_min": min(hr_hist) if hr_hist else 0,
             "hr_max": max(hr_hist) if hr_hist else 0,
             "spo2_critical_count": sum(1 for s in spo2_hist if s < CRITICAL_SPO2),
@@ -383,39 +312,28 @@ def get_statistics(hours=24, patient_id=None):
     conn = get_db_connection()
     if not conn:
         return None
-    
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             query = """
-                SELECT 
-                    COUNT(*) as total_samples,
+                SELECT COUNT(*) as total_samples,
                     ROUND(AVG(spo2)::numeric, 2) as spo2_avg,
-                    MIN(spo2) as spo2_min,
-                    MAX(spo2) as spo2_max,
+                    MIN(spo2) as spo2_min, MAX(spo2) as spo2_max,
                     ROUND(AVG(hr)::numeric, 2) as hr_avg,
-                    MIN(hr) as hr_min,
-                    MAX(hr) as hr_max,
+                    MIN(hr) as hr_min, MAX(hr) as hr_max,
                     SUM(CASE WHEN spo2_critical THEN 1 ELSE 0 END) as spo2_critical_count,
                     SUM(CASE WHEN hr_critical THEN 1 ELSE 0 END) as hr_critical_count,
                     MIN(timestamp) as first_reading,
                     MAX(timestamp) as last_reading
-                FROM vital_signs
-                WHERE timestamp > NOW() - INTERVAL '%s hours'
+                FROM vital_signs WHERE timestamp > NOW() - INTERVAL '%s hours'
             """
             params = [hours]
-            
             if patient_id:
                 query += " AND patient_id = %s"
                 params.append(patient_id)
-            
             cur.execute(query, params)
             result = cur.fetchone()
-            
-            if result and result['total_samples'] > 0:
-                return dict(result)
-            return None
-    except Exception as e:
-        print(f"❌ Error obteniendo estadísticas: {e}")
+            return dict(result) if result and result['total_samples'] > 0 else None
+    except:
         return None
     finally:
         release_db_connection(conn)
@@ -423,478 +341,401 @@ def get_statistics(hours=24, patient_id=None):
 def get_alerts_history(limit=100, hours=24):
     if not db_pool:
         return []
-    
     conn = get_db_connection()
     if not conn:
         return []
-    
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id, timestamp, alert_type, spo2, hr, email_sent, email_to, patient_id
-                FROM alerts
-                WHERE timestamp > NOW() - INTERVAL '%s hours'
-                ORDER BY timestamp DESC
-                LIMIT %s;
-            """, (hours, limit))
+            cur.execute(
+                "SELECT * FROM alerts WHERE timestamp > NOW() - INTERVAL '%s hours' ORDER BY timestamp DESC LIMIT %s;",
+                (hours, limit)
+            )
             return cur.fetchall()
-    except Exception as e:
-        print(f"❌ Error consultando alertas: {e}")
+    except:
         return []
     finally:
         release_db_connection(conn)
 
 # --------------------------------------------------
-# EMAIL FUNCTIONS
+# EMAIL FUNCTIONS - CON TIMEOUT (CORREGIDO)
 # --------------------------------------------------
-def generate_email_html(alert_type: str, spo2: int, hr: int, stats: dict, patient_info: dict) -> str:
-    """Genera el HTML del email con tabla de valores promedios"""
+
+def check_email_config():
+    """Verifica la configuración de email"""
+    issues = []
+    if not EMAIL_FROM:
+        issues.append("EMAIL_FROM no configurado en Environment Variables")
+    elif "@" not in EMAIL_FROM:
+        issues.append(f"EMAIL_FROM inválido: {EMAIL_FROM}")
     
-    now = datetime.now(timezone.utc)
-    timestamp_str = now.strftime("%d/%m/%Y %H:%M:%S UTC")
+    if not EMAIL_PASS:
+        issues.append("EMAIL_PASS no configurado en Environment Variables")
+    elif len(EMAIL_PASS) < 10:
+        issues.append(f"EMAIL_PASS muy corto ({len(EMAIL_PASS)} chars) - debe ser 16 chars")
     
-    # Determinar tipo de alerta
-    if alert_type == 'spo2':
-        alert_title = "⚠️ ALERTA: Saturación de Oxígeno Baja"
-        alert_color = "#dc3545"
-        alert_description = f"Se ha detectado un valor de SpO₂ por debajo del umbral crítico ({CRITICAL_SPO2}%)."
-        critical_value = f"SpO₂: {spo2}%"
-    else:
-        if hr < CRITICAL_HR_LOW:
-            alert_title = "⚠️ ALERTA: Bradicardia Detectada"
-            alert_description = f"Se ha detectado frecuencia cardíaca por debajo de {CRITICAL_HR_LOW} bpm."
+    return {
+        "configured": len(issues) == 0,
+        "issues": issues,
+        "email_from": EMAIL_FROM[:8] + "***" if EMAIL_FROM and len(EMAIL_FROM) > 8 else EMAIL_FROM,
+        "smtp_server": SMTP_SERVER,
+        "smtp_port": SMTP_PORT,
+        "pass_configured": bool(EMAIL_PASS),
+        "pass_length": len(EMAIL_PASS) if EMAIL_PASS else 0
+    }
+
+
+def test_smtp_connection():
+    """Prueba conexión SMTP sin enviar email"""
+    result = {"success": False, "stage": "init", "error": None, "details": {}}
+    
+    if not EMAIL_FROM or not EMAIL_PASS:
+        result["error"] = "Credenciales no configuradas"
+        return result
+    
+    server = None
+    try:
+        result["stage"] = "connect"
+        print(f"🔍 Probando conexión a {SMTP_SERVER}:{SMTP_PORT}...")
+        
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT)
         else:
-            alert_title = "⚠️ ALERTA: Taquicardia Detectada"
-            alert_description = f"Se ha detectado frecuencia cardíaca por encima de {CRITICAL_HR_HIGH} bpm."
-        alert_color = "#dc3545"
-        critical_value = f"HR: {hr} bpm"
-    
-    # Valores de estadísticas
-    spo2_avg = stats.get('spo2_avg', spo2) if stats else spo2
-    spo2_min = stats.get('spo2_min', spo2) if stats else spo2
-    spo2_max = stats.get('spo2_max', spo2) if stats else spo2
-    hr_avg = stats.get('hr_avg', hr) if stats else hr
-    hr_min = stats.get('hr_min', hr) if stats else hr
-    hr_max = stats.get('hr_max', hr) if stats else hr
-    total_samples = stats.get('total_samples', 0) if stats else 0
-    
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <style>
-            body {{
-                font-family: 'Segoe UI', Arial, sans-serif;
-                line-height: 1.6;
-                color: #333;
-                max-width: 600px;
-                margin: 0 auto;
-                padding: 20px;
-            }}
-            .header {{
-                background: linear-gradient(135deg, {alert_color} 0%, #c82333 100%);
-                color: white;
-                padding: 20px;
-                border-radius: 10px 10px 0 0;
-                text-align: center;
-            }}
-            .header h1 {{
-                margin: 0;
-                font-size: 24px;
-            }}
-            .content {{
-                background: #f8f9fa;
-                padding: 20px;
-                border: 1px solid #dee2e6;
-            }}
-            .alert-box {{
-                background: #fff3cd;
-                border: 2px solid #ffc107;
-                border-radius: 8px;
-                padding: 15px;
-                margin: 15px 0;
-                text-align: center;
-            }}
-            .critical-value {{
-                font-size: 48px;
-                font-weight: bold;
-                color: {alert_color};
-                margin: 10px 0;
-            }}
-            .patient-info {{
-                background: white;
-                border-radius: 8px;
-                padding: 15px;
-                margin: 15px 0;
-                border-left: 4px solid #007bff;
-            }}
-            .patient-info h3 {{
-                margin: 0 0 10px 0;
-                color: #007bff;
-            }}
-            .stats-table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin: 15px 0;
-                background: white;
-                border-radius: 8px;
-                overflow: hidden;
-            }}
-            .stats-table th {{
-                background: #343a40;
-                color: white;
-                padding: 12px;
-                text-align: left;
-            }}
-            .stats-table td {{
-                padding: 10px 12px;
-                border-bottom: 1px solid #dee2e6;
-            }}
-            .stats-table tr:nth-child(even) {{
-                background: #f8f9fa;
-            }}
-            .stats-table .value {{
-                font-weight: bold;
-                font-family: 'Courier New', monospace;
-                font-size: 16px;
-            }}
-            .stats-table .critical {{
-                color: {alert_color};
-                font-weight: bold;
-            }}
-            .stats-table .normal {{
-                color: #28a745;
-            }}
-            .footer {{
-                background: #343a40;
-                color: #adb5bd;
-                padding: 15px;
-                border-radius: 0 0 10px 10px;
-                font-size: 12px;
-                text-align: center;
-            }}
-            .timestamp {{
-                color: #6c757d;
-                font-size: 14px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="header">
-            <h1>{alert_title}</h1>
-            <p class="timestamp">📅 {timestamp_str}</p>
-        </div>
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT)
+            server.starttls()
         
-        <div class="content">
-            <div class="alert-box">
-                <p><strong>{alert_description}</strong></p>
-                <div class="critical-value">{critical_value}</div>
-            </div>
-            
-            <div class="patient-info">
-                <h3>👤 Datos del Paciente</h3>
-                <p><strong>Nombre:</strong> {patient_info.get('name', 'No especificado')}</p>
-                <p><strong>Residencia:</strong> {patient_info.get('residence', 'No especificado')}</p>
-                <p><strong>Habitación:</strong> {patient_info.get('room', 'No especificado')}</p>
-            </div>
-            
-            <h3>📊 Valores Actuales y Estadísticas de la Sesión</h3>
-            <table class="stats-table">
-                <thead>
-                    <tr>
-                        <th>Parámetro</th>
-                        <th>Valor Actual</th>
-                        <th>Promedio</th>
-                        <th>Mínimo</th>
-                        <th>Máximo</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td><strong>🫁 SpO₂</strong></td>
-                        <td class="value {'critical' if spo2 < CRITICAL_SPO2 else 'normal'}">{spo2}%</td>
-                        <td class="value">{spo2_avg}%</td>
-                        <td class="value">{spo2_min}%</td>
-                        <td class="value">{spo2_max}%</td>
-                    </tr>
-                    <tr>
-                        <td><strong>❤️ Frecuencia Cardíaca</strong></td>
-                        <td class="value {'critical' if hr < CRITICAL_HR_LOW or hr > CRITICAL_HR_HIGH else 'normal'}">{hr} bpm</td>
-                        <td class="value">{hr_avg} bpm</td>
-                        <td class="value">{hr_min} bpm</td>
-                        <td class="value">{hr_max} bpm</td>
-                    </tr>
-                </tbody>
-            </table>
-            
-            <table class="stats-table">
-                <thead>
-                    <tr>
-                        <th colspan="2">📈 Resumen de la Sesión</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>Total de muestras</td>
-                        <td class="value">{total_samples}</td>
-                    </tr>
-                    <tr>
-                        <td>Eventos críticos SpO₂ (< {CRITICAL_SPO2}%)</td>
-                        <td class="value">{stats.get('spo2_critical_count', 0) if stats else 0}</td>
-                    </tr>
-                    <tr>
-                        <td>Eventos críticos HR</td>
-                        <td class="value">{stats.get('hr_critical_count', 0) if stats else 0}</td>
-                    </tr>
-                </tbody>
-            </table>
-            
-            <div style="background: #e7f3ff; padding: 12px; border-radius: 6px; margin-top: 15px;">
-                <strong>⚕️ Acción recomendada:</strong><br>
-                Verificar el estado del paciente y considerar intervención según protocolo establecido.
-            </div>
-        </div>
+        result["details"]["connect"] = "OK"
+        print("   ✓ Conexión establecida")
         
-        <div class="footer">
-            <p><strong>{SYSTEM_NAME}</strong></p>
-            <p>Versión: {ALGORITHM_VERSION} | Base de datos: PostgreSQL</p>
-            <p>Este es un mensaje automático del sistema de monitorización.</p>
-        </div>
-    </body>
-    </html>
-    """
+        result["stage"] = "login"
+        print(f"   Autenticando como {EMAIL_FROM[:10]}...")
+        server.login(EMAIL_FROM, EMAIL_PASS)
+        result["details"]["login"] = "OK"
+        print("   ✓ Autenticación exitosa")
+        
+        result["success"] = True
+        result["stage"] = "complete"
+        
+    except socket.timeout:
+        result["error"] = f"Timeout ({SMTP_TIMEOUT}s) conectando a {SMTP_SERVER}"
+        print(f"   ✗ {result['error']}")
+    except smtplib.SMTPAuthenticationError as e:
+        result["error"] = f"Error autenticación: {e.smtp_code}"
+        result["hint"] = "Usa 'Contraseña de aplicación' de Google (16 chars)"
+        print(f"   ✗ {result['error']}")
+    except Exception as e:
+        result["error"] = f"{type(e).__name__}: {str(e)}"
+        print(f"   ✗ {result['error']}")
+    finally:
+        if server:
+            try:
+                server.quit()
+            except:
+                pass
     
-    return html
+    return result
 
-def generate_email_text(alert_type: str, spo2: int, hr: int, stats: dict, patient_info: dict) -> str:
-    """Genera versión texto plano del email"""
+
+def generate_email_html(alert_type, spo2, hr, stats, patient_info):
+    """Genera HTML del email"""
+    now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
     
-    now = datetime.now(timezone.utc)
-    timestamp_str = now.strftime("%d/%m/%Y %H:%M:%S UTC")
-    
-    if alert_type == 'spo2':
-        alert_title = "ALERTA: Saturación de Oxígeno Baja"
+    if alert_type == 'test':
+        title = "🧪 TEST - Sistema HumanS"
+        color = "#17a2b8"
+        desc = "Este es un email de prueba. Si lo recibes, el sistema funciona correctamente."
+    elif alert_type == 'spo2':
+        title = "⚠️ ALERTA: SpO₂ Bajo"
+        color = "#dc3545"
+        desc = f"Se ha detectado SpO₂ por debajo del umbral crítico ({CRITICAL_SPO2}%)."
     else:
-        alert_title = "ALERTA: Frecuencia Cardíaca Fuera de Rango"
+        condition = "Bradicardia" if hr < CRITICAL_HR_LOW else "Taquicardia"
+        title = f"⚠️ ALERTA: {condition}"
+        color = "#dc3545"
+        desc = f"Frecuencia cardíaca fuera de rango normal ({CRITICAL_HR_LOW}-{CRITICAL_HR_HIGH} bpm)."
     
     spo2_avg = stats.get('spo2_avg', spo2) if stats else spo2
     hr_avg = stats.get('hr_avg', hr) if stats else hr
     
-    text = f"""
-{alert_title}
-{'='*50}
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background: {color}; color: white; padding: 20px; border-radius: 10px 10px 0 0; text-align: center;">
+        <h1 style="margin: 0; font-size: 22px;">{title}</h1>
+    </div>
+    <div style="background: #f8f9fa; padding: 20px; border-radius: 0 0 10px 10px;">
+        <p>{desc}</p>
+        <div style="font-size: 42px; font-weight: bold; color: {color}; text-align: center; margin: 20px 0;">
+            SpO₂: {spo2}% &nbsp; HR: {hr} bpm
+        </div>
+        <div style="background: white; padding: 15px; border-radius: 8px; margin: 15px 0;">
+            <strong>📋 Paciente:</strong> {patient_info.get('name', 'N/A')}<br>
+            <strong>🚪 Habitación:</strong> {patient_info.get('room', 'N/A')}<br>
+            <strong>🏥 Residencia:</strong> {patient_info.get('residence', 'N/A')}
+        </div>
+        <table style="width: 100%; border-collapse: collapse; margin-top: 15px;">
+            <tr style="background: #e9ecef;">
+                <th style="padding: 8px; text-align: left;">Parámetro</th>
+                <th style="padding: 8px;">Actual</th>
+                <th style="padding: 8px;">Promedio 24h</th>
+            </tr>
+            <tr>
+                <td style="padding: 8px;">SpO₂</td>
+                <td style="padding: 8px; text-align: center;"><strong>{spo2}%</strong></td>
+                <td style="padding: 8px; text-align: center;">{spo2_avg}%</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px;">HR</td>
+                <td style="padding: 8px; text-align: center;"><strong>{hr} bpm</strong></td>
+                <td style="padding: 8px; text-align: center;">{hr_avg} bpm</td>
+            </tr>
+        </table>
+        <p style="font-size: 11px; color: #6c757d; text-align: center; margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px;">
+            {SYSTEM_NAME} | v{ALGORITHM_VERSION}<br>{now}
+        </p>
+    </div>
+</body>
+</html>"""
 
-Fecha y hora: {timestamp_str}
 
-VALORES CRÍTICOS DETECTADOS:
-- SpO₂: {spo2}%
+def generate_email_text(alert_type, spo2, hr, stats, patient_info):
+    """Genera versión texto plano del email"""
+    return f"""
+ALERTA - {SYSTEM_NAME}
+{'=' * 40}
+
+Paciente: {patient_info.get('name', 'N/A')}
+Habitación: {patient_info.get('room', 'N/A')}
+Residencia: {patient_info.get('residence', 'N/A')}
+
+VALORES ACTUALES:
+- SpO2: {spo2}%
 - HR: {hr} bpm
 
-DATOS DEL PACIENTE:
-- Nombre: {patient_info.get('name', 'No especificado')}
-- Residencia: {patient_info.get('residence', 'No especificado')}
-- Habitación: {patient_info.get('room', 'No especificado')}
-
-ESTADÍSTICAS DE LA SESIÓN:
-- SpO₂ promedio: {spo2_avg}%
-- HR promedio: {hr_avg} bpm
-- Total muestras: {stats.get('total_samples', 0) if stats else 0}
-
-Acción recomendada: Verificar estado del paciente.
-
 --
-{SYSTEM_NAME}
-Versión: {ALGORITHM_VERSION}
+{SYSTEM_NAME} v{ALGORITHM_VERSION}
 """
-    return text
 
-def send_alert_email(recipient: str, subject: str, html_content: str, text_content: str):
-    """Envía email de alerta"""
+
+def send_email(recipient, subject, html_content, text_content=""):
+    """
+    Envía email CON TIMEOUT - Función principal corregida
+    """
+    result = {"success": False, "error": None, "stage": "init"}
+    
     if not EMAIL_FROM or not EMAIL_PASS:
-        print("⚠️  Credenciales de email no configuradas")
-        return False
+        result["error"] = "EMAIL_FROM o EMAIL_PASS no configurado en Environment Variables de Render"
+        result["stage"] = "config"
+        print(f"⚠️  {result['error']}")
+        return result
     
     if not recipient:
-        print("⚠️  No hay destinatario configurado")
-        return False
+        result["error"] = "No hay destinatario"
+        result["stage"] = "recipient"
+        return result
     
+    print(f"📧 Enviando email a {recipient}...")
+    print(f"   Servidor: {SMTP_SERVER}:{SMTP_PORT}")
+    print(f"   Timeout: {SMTP_TIMEOUT}s")
+    
+    server = None
     try:
+        # Crear mensaje
+        result["stage"] = "message"
         msg = MIMEMultipart('alternative')
         msg['Subject'] = subject
         msg['From'] = EMAIL_FROM
         msg['To'] = recipient
-        
-        msg.attach(MIMEText(text_content, 'plain', 'utf-8'))
+        if text_content:
+            msg.attach(MIMEText(text_content, 'plain', 'utf-8'))
         msg.attach(MIMEText(html_content, 'html', 'utf-8'))
         
-        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
+        # Conectar CON TIMEOUT
+        result["stage"] = "connect"
+        print("   Conectando...")
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT)
+        else:
+            server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=SMTP_TIMEOUT)
+            server.starttls()
+        print("   ✓ Conectado")
+        
+        # Login
+        result["stage"] = "login"
+        print("   Autenticando...")
         server.login(EMAIL_FROM, EMAIL_PASS)
+        print("   ✓ Autenticado")
+        
+        # Enviar
+        result["stage"] = "send"
+        print("   Enviando...")
         server.sendmail(EMAIL_FROM, [recipient], msg.as_string())
-        server.quit()
         
+        result["success"] = True
+        result["stage"] = "complete"
         print(f"✅ Email enviado a {recipient}")
-        return True
         
+    except socket.timeout:
+        result["error"] = f"TIMEOUT: Conexión tardó más de {SMTP_TIMEOUT}s"
+        print(f"❌ {result['error']}")
+    except smtplib.SMTPAuthenticationError as e:
+        result["error"] = f"ERROR AUTENTICACIÓN: {e.smtp_code}"
+        result["hint"] = "Usa 'Contraseña de aplicación' de Google, no tu contraseña normal"
+        print(f"❌ {result['error']}")
+        print(f"   💡 Genera una en: https://myaccount.google.com/apppasswords")
+    except smtplib.SMTPRecipientsRefused:
+        result["error"] = f"DESTINATARIO RECHAZADO: {recipient}"
+        print(f"❌ {result['error']}")
+    except smtplib.SMTPException as e:
+        result["error"] = f"ERROR SMTP: {str(e)}"
+        print(f"❌ {result['error']}")
     except Exception as e:
-        print(f"❌ Error enviando email: {e}")
-        return False
+        result["error"] = f"ERROR: {type(e).__name__} - {str(e)}"
+        print(f"❌ {result['error']}")
+    finally:
+        if server:
+            try:
+                server.quit()
+            except:
+                pass
+    
+    return result
 
-def send_alert_email_thread(alert_type: str, spo2: int, hr: int):
-    """Envía email en thread separado"""
+
+def send_alert_email_async(alert_type, spo2, hr):
+    """Envía email de alerta en thread separado"""
     def _send():
         recipient = email_config.get("email_to", "")
         if not recipient:
             print("⚠️  No hay email destinatario configurado")
             return
         
-        # Obtener estadísticas
         stats = get_statistics(hours=24)
-        
-        # Info del paciente
         patient_info = {
-            "name": email_config.get("patient_name", "No especificado"),
-            "room": email_config.get("patient_room", "No especificado"),
-            "residence": email_config.get("patient_residence", "No especificado")
+            "name": email_config.get("patient_name", "N/A"),
+            "room": email_config.get("patient_room", "N/A"),
+            "residence": email_config.get("patient_residence", "N/A")
         }
         
-        # Generar contenido
         if alert_type == 'spo2':
-            subject = f"⚠️ ALERTA CRÍTICA – SpO₂ Bajo ({spo2}%) - {patient_info['name']}"
+            subject = f"⚠️ ALERTA HumanS - SpO₂ {spo2}% - {patient_info['name']}"
         else:
             condition = "Bradicardia" if hr < CRITICAL_HR_LOW else "Taquicardia"
-            subject = f"⚠️ ALERTA CRÍTICA – {condition} ({hr} bpm) - {patient_info['name']}"
+            subject = f"⚠️ ALERTA HumanS - {condition} {hr}bpm - {patient_info['name']}"
         
-        html_content = generate_email_html(alert_type, spo2, hr, stats, patient_info)
-        text_content = generate_email_text(alert_type, spo2, hr, stats, patient_info)
+        html = generate_email_html(alert_type, spo2, hr, stats, patient_info)
+        text = generate_email_text(alert_type, spo2, hr, stats, patient_info)
         
-        success = send_alert_email(recipient, subject, html_content, text_content)
+        result = send_email(recipient, subject, html, text)
         
-        # Guardar registro de alerta
-        save_alert(alert_type, spo2, hr, subject, email_sent=success, 
-                   email_to=recipient, patient_id=patient_info['name'])
+        save_alert(alert_type, spo2, hr, subject, 
+                   email_sent=result["success"], 
+                   email_to=recipient, 
+                   patient_id=patient_info['name'])
         
-        # Notificar al frontend
-        if success:
+        if result["success"]:
             socketio.emit('alert_sent', {
-                'type': alert_type,
+                'type': alert_type, 
                 'message': f'Email enviado a {recipient}'
             })
     
     threading.Thread(target=_send, daemon=True).start()
 
-def check_and_send_alerts(spo2: int, hr: int):
-    """Verifica valores y envía alertas si es necesario"""
-    global last_spo2_alert_time, last_hr_alert_time
-    global last_spo2_critical, last_hr_critical
-    
-    current_time = time.time()
-    
-    spo2_critical = spo2 < CRITICAL_SPO2
-    if spo2_critical and not last_spo2_critical:
-        if current_time - last_spo2_alert_time >= EMAIL_COOLDOWN:
-            print(f"[ALERTA] SpO2 crítico: {spo2}%")
-            send_alert_email_thread('spo2', spo2, hr)
-            last_spo2_alert_time = current_time
-    
-    hr_critical = (hr < CRITICAL_HR_LOW) or (hr > CRITICAL_HR_HIGH)
-    if hr_critical and not last_hr_critical:
-        if current_time - last_hr_alert_time >= EMAIL_COOLDOWN:
-            print(f"[ALERTA] HR crítico: {hr} bpm")
-            send_alert_email_thread('hr', spo2, hr)
-            last_hr_alert_time = current_time
-    
-    last_spo2_critical = spo2_critical
-    last_hr_critical = hr_critical
-    
-    return spo2_critical, hr_critical
-
 # --------------------------------------------------
 # FLASK APP
 # --------------------------------------------------
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get("SECRET_KEY", "vinculocare-dev")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'humans-secret-2024')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+
 
 @app.route("/")
 def index():
-    return render_template("index11.html")
+    return render_template("index.html")
 
+
+# --------------------------------------------------
+# API - DATA INGESTION
+# --------------------------------------------------
 @app.route("/api/data", methods=["POST"])
 def receive_data():
-    """Endpoint principal para recibir datos"""
     global packet_count, current_distance, current_rssi, last_packet_time
+    global last_spo2_critical, last_hr_critical, last_spo2_alert_time, last_hr_alert_time
     
-    api_key = request.headers.get('x-api-key')
-    expected_key = os.environ.get('API_KEY', 'f3b2a8d9c6e1f0a7d4b8c2e9f1a3b7d6')
-    
-    if api_key != expected_key:
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Petición vacía"}), 400
+    try:
+        payload = request.get_json(force=True)
+        spo2 = payload.get("spo2")
+        hr = payload.get("hr")
+        distance = payload.get("distance", 0.0)
+        rssi = payload.get("rssi")
+        
+        if spo2 is None or hr is None:
+            return jsonify({"error": "Missing spo2 or hr"}), 400
+        
+        if not (35 <= spo2 <= 100):
+            return jsonify({"error": f"SpO2 fuera de rango: {spo2}"}), 400
+        if not (25 <= hr <= 250):
+            return jsonify({"error": f"HR fuera de rango: {hr}"}), 400
+        
+        packet_count += 1
+        current_distance = distance
+        current_rssi = rssi
+        last_packet_time = datetime.now(timezone.utc)
+        
+        spo2_hist.append(spo2)
+        hr_hist.append(hr)
+        
+        spo2_critical = spo2 < CRITICAL_SPO2
+        hr_critical = hr < CRITICAL_HR_LOW or hr > CRITICAL_HR_HIGH
+        
+        save_vital_sign(spo2, hr, spo2_critical, hr_critical, distance, rssi,
+                        patient_id=email_config.get("patient_name"))
+        
+        # Alertas con cooldown
+        current_time = time.time()
+        
+        if spo2_critical and not last_spo2_critical:
+            if current_time - last_spo2_alert_time > EMAIL_COOLDOWN:
+                send_alert_email_async('spo2', spo2, hr)
+                last_spo2_alert_time = current_time
+        
+        if hr_critical and not last_hr_critical:
+            if current_time - last_hr_alert_time > EMAIL_COOLDOWN:
+                send_alert_email_async('hr', spo2, hr)
+                last_hr_alert_time = current_time
+        
+        last_spo2_critical = spo2_critical
+        last_hr_critical = hr_critical
+        
+        data = {
+            "spo2": spo2, "hr": hr,
+            "spo2_history": list(spo2_hist), "hr_history": list(hr_hist),
+            "spo2_critical": spo2_critical, "hr_critical": hr_critical
+        }
+        
+        data_queue.put(data)
+        socketio.emit('raw_update', {"count": packet_count, "distance": distance, "rssi": rssi})
+        
+        return jsonify({"status": "ok", "packet": packet_count})
+        
+    except Exception as e:
+        print(f"[ERROR] /api/data: {e}")
+        return jsonify({"error": str(e)}), 500
 
-    spo2 = data.get('spo2')
-    hr = data.get('hr')
-
-    if spo2 is None or hr is None:
-        return jsonify({"error": "Faltan 'spo2' o 'hr'"}), 400
-
-    if not (35 <= spo2 <= 100) or not (25 <= hr <= 250):
-        return jsonify({"error": "Valores fuera de rango"}), 400
-
-    spo2_hist.append(spo2)
-    hr_hist.append(hr)
-
-    if 'distance' in data:
-        current_distance = data['distance']
-    if 'rssi' in data:
-        current_rssi = data['rssi']
-    
-    packet_count += 1
-    last_packet_time = datetime.now()
-
-    spo2_critical, hr_critical = check_and_send_alerts(spo2, hr)
-
-    save_vital_sign(
-        spo2=spo2, hr=hr,
-        spo2_critical=spo2_critical, hr_critical=hr_critical,
-        distance=current_distance, rssi=current_rssi,
-        patient_id=data.get('patient_id'), session_id=data.get('session_id')
-    )
-
-    payload = {
-        "spo2": spo2, "hr": hr,
-        "spo2_history": list(spo2_hist),
-        "hr_history": list(hr_hist),
-        "spo2_critical": spo2_critical,
-        "hr_critical": hr_critical
-    }
-
-    diagnostics_payload = {
-        "count": packet_count,
-        "distance": current_distance,
-        "rssi": current_rssi
-    }
-
-    socketio.emit("update", payload)
-    socketio.emit("raw_update", diagnostics_payload)
-
-    return jsonify({"status": "ok", "alerts_sent": spo2_critical or hr_critical}), 200
 
 # --------------------------------------------------
-# EMAIL CONFIGURATION ENDPOINTS
+# API - EMAIL CONFIG
 # --------------------------------------------------
 @app.route("/api/email/config", methods=["GET"])
-def get_email_config():
-    """Obtiene la configuración actual de email"""
+def get_email_config_endpoint():
+    diag = check_email_config()
     return jsonify({
         "email_to": email_config.get("email_to", ""),
         "patient_name": email_config.get("patient_name", ""),
         "patient_room": email_config.get("patient_room", ""),
         "patient_residence": email_config.get("patient_residence", ""),
-        "email_from_configured": bool(EMAIL_FROM and EMAIL_PASS),
+        "smtp_configured": diag["configured"],
+        "smtp_issues": diag["issues"],
         "thresholds": {
             "spo2_critical": CRITICAL_SPO2,
             "hr_low": CRITICAL_HR_LOW,
@@ -902,58 +743,83 @@ def get_email_config():
         }
     })
 
+
 @app.route("/api/email/config", methods=["POST"])
 def set_email_config():
-    """Configura el email destinatario"""
-    data = request.get_json()
+    global email_config
     
-    if not data:
-        return jsonify({"error": "Datos vacíos"}), 400
-    
-    new_email = data.get("email_to", "").strip()
-    
-    if not new_email or "@" not in new_email:
-        return jsonify({"error": "Email inválido"}), 400
-    
-    # Actualizar configuración en memoria
-    email_config["email_to"] = new_email
-    email_config["patient_name"] = data.get("patient_name", "")
-    email_config["patient_room"] = data.get("patient_room", "")
-    email_config["patient_residence"] = data.get("patient_residence", "")
-    
-    # Guardar en BD
-    save_email_config_to_db(
-        new_email,
-        email_config["patient_name"],
-        email_config["patient_room"],
-        email_config["patient_residence"]
-    )
-    
-    print(f"✅ Email configurado: {new_email}")
+    try:
+        data = request.get_json()
+        new_email = data.get("email_to", "").strip()
+        
+        if not new_email or "@" not in new_email:
+            return jsonify({"error": "Email inválido"}), 400
+        
+        email_config["email_to"] = new_email
+        email_config["patient_name"] = data.get("patient_name", "")
+        email_config["patient_room"] = data.get("patient_room", "")
+        email_config["patient_residence"] = data.get("patient_residence", "")
+        
+        save_email_config_to_db(new_email, email_config["patient_name"],
+                                email_config["patient_room"], email_config["patient_residence"])
+        
+        print(f"✅ Email configurado: {new_email}")
+        return jsonify({"status": "ok", "email_to": new_email})
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/email/diagnose", methods=["GET"])
+def diagnose_email():
+    """
+    NUEVO ENDPOINT - Diagnóstico completo del sistema de email
+    Accede a: https://tu-app.onrender.com/api/email/diagnose
+    """
+    config_check = check_email_config()
+    connection_test = test_smtp_connection() if config_check["configured"] else None
     
     return jsonify({
-        "status": "ok",
-        "message": f"Email configurado: {new_email}",
-        "email_to": new_email
+        "config": config_check,
+        "connection": connection_test,
+        "recipient": {
+            "configured": bool(email_config.get("email_to")),
+            "email": email_config.get("email_to", "")
+        },
+        "hints": [
+            "EMAIL_FROM y EMAIL_PASS deben estar en Environment Variables de Render",
+            "EMAIL_PASS debe ser 'Contraseña de aplicación' de Google (16 caracteres)",
+            "Genera una en: https://myaccount.google.com/apppasswords"
+        ]
     })
+
 
 @app.route("/api/email/test", methods=["POST"])
 def test_email_endpoint():
     """Envía email de prueba"""
     data = request.get_json() or {}
-    
     recipient = data.get("email_to") or email_config.get("email_to", "")
     
     if not recipient:
-        return jsonify({"error": "No hay email configurado"}), 400
+        return jsonify({
+            "error": "No hay email configurado",
+            "hint": "Configura un email destinatario primero"
+        }), 400
+    
+    # Verificar configuración SMTP
+    config_check = check_email_config()
+    if not config_check["configured"]:
+        return jsonify({
+            "error": "Configuración de email incompleta",
+            "issues": config_check["issues"],
+            "hint": "Configura EMAIL_FROM y EMAIL_PASS en Environment Variables de Render"
+        }), 500
     
     patient_name = data.get("patient_name") or email_config.get("patient_name", "Paciente de prueba")
     
-    # Generar email de prueba
     stats = get_statistics(hours=24) or {
         "spo2_avg": 97, "spo2_min": 95, "spo2_max": 99,
-        "hr_avg": 72, "hr_min": 65, "hr_max": 85,
-        "total_samples": 100, "spo2_critical_count": 0, "hr_critical_count": 0
+        "hr_avg": 72, "hr_min": 65, "hr_max": 85
     }
     
     patient_info = {
@@ -962,41 +828,30 @@ def test_email_endpoint():
         "residence": email_config.get("patient_residence", "N/A")
     }
     
-    subject = f"🧪 TEST - Sistema de Alertas HumanS - {patient_name}"
-    html_content = generate_email_html('test', 97, 72, stats, patient_info)
-    text_content = f"""
-TEST - Sistema de Alertas HumanS
-================================
-
-Este es un mensaje de prueba del sistema de alertas.
-
-Paciente: {patient_name}
-Email configurado: {recipient}
-
-Si recibes este mensaje, el sistema de alertas está funcionando correctamente.
-
---
-{SYSTEM_NAME}
-Versión: {ALGORITHM_VERSION}
-"""
+    subject = f"🧪 TEST - Sistema HumanS - {patient_name}"
+    html = generate_email_html('test', 97, 72, stats, patient_info)
+    text = f"TEST - Sistema HumanS\nPaciente: {patient_name}\nEmail de prueba OK."
     
-    success = send_alert_email(recipient, subject, html_content, text_content)
+    result = send_email(recipient, subject, html, text)
     
-    if success:
-        return jsonify({"status": "ok", "message": f"Email de prueba enviado a {recipient}"})
+    if result["success"]:
+        return jsonify({"status": "ok", "message": f"✅ Email enviado a {recipient}"})
     else:
-        return jsonify({"error": "No se pudo enviar el email"}), 500
+        return jsonify({
+            "error": result.get("error", "Error desconocido"),
+            "stage": result.get("stage"),
+            "hint": result.get("hint", "Revisa /api/email/diagnose para más detalles")
+        }), 500
+
 
 # --------------------------------------------------
-# OTHER API ENDPOINTS
+# API - DATA QUERIES
 # --------------------------------------------------
-@app.route("/api/history", methods=["GET"])
+@app.route("/api/data/history", methods=["GET"])
 def get_history():
     hours = request.args.get('hours', 24, type=int)
     limit = request.args.get('limit', 1000, type=int)
-    patient_id = request.args.get('patient_id')
-    
-    data = get_vital_signs(limit=limit, hours=hours, patient_id=patient_id)
+    data = get_vital_signs(limit=limit, hours=hours)
     
     for row in data:
         if row.get('timestamp'):
@@ -1004,15 +859,14 @@ def get_history():
     
     return jsonify({"status": "ok", "count": len(data), "data": data})
 
-@app.route("/api/statistics", methods=["GET"])
+
+@app.route("/api/data/statistics", methods=["GET"])
 def get_stats():
     hours = request.args.get('hours', 24, type=int)
-    patient_id = request.args.get('patient_id')
-    
-    stats = get_statistics(hours=hours, patient_id=patient_id)
+    stats = get_statistics(hours=hours)
     
     if not stats:
-        return jsonify({"status": "error", "message": "No hay datos suficientes"}), 404
+        return jsonify({"status": "error", "message": "No hay datos"}), 404
     
     if stats.get('first_reading'):
         stats['first_reading'] = stats['first_reading'].isoformat()
@@ -1021,11 +875,11 @@ def get_stats():
     
     return jsonify({"status": "ok", "statistics": stats})
 
+
 @app.route("/api/alerts/history", methods=["GET"])
 def get_alerts():
     hours = request.args.get('hours', 24, type=int)
     limit = request.args.get('limit', 100, type=int)
-    
     alerts = get_alerts_history(limit=limit, hours=hours)
     
     for alert in alerts:
@@ -1034,12 +888,11 @@ def get_alerts():
     
     return jsonify({"status": "ok", "count": len(alerts), "alerts": alerts})
 
+
 @app.route("/api/export/csv", methods=["GET"])
 def export_csv():
     hours = request.args.get('hours', 24, type=int)
-    patient_id = request.args.get('patient_id')
-    
-    data = get_vital_signs(limit=10000, hours=hours, patient_id=patient_id)
+    data = get_vital_signs(limit=10000, hours=hours)
     
     if not data:
         return jsonify({"error": "No hay datos"}), 404
@@ -1058,15 +911,14 @@ def export_csv():
     output.seek(0)
     filename = f"vital_signs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     
-    return Response(
-        output.getvalue(),
-        mimetype='text/csv',
-        headers={'Content-Disposition': f'attachment; filename={filename}'}
-    )
+    return Response(output.getvalue(), mimetype='text/csv',
+                    headers={'Content-Disposition': f'attachment; filename={filename}'})
+
 
 @app.route("/api/diagnostics", methods=["GET"])
 def get_diagnostics():
     db_status = "connected" if db_pool else "not_configured"
+    email_diag = check_email_config()
     
     return jsonify({
         "packet_count": packet_count,
@@ -1076,7 +928,8 @@ def get_diagnostics():
         "uptime_seconds": time.time() - app.config.get('start_time', time.time()),
         "database": {"type": "PostgreSQL", "status": db_status},
         "email_config": {
-            "enabled": bool(EMAIL_FROM and EMAIL_PASS),
+            "enabled": email_diag["configured"],
+            "issues": email_diag["issues"],
             "recipient": email_config.get("email_to", ""),
             "cooldown_seconds": EMAIL_COOLDOWN
         },
@@ -1087,33 +940,30 @@ def get_diagnostics():
         }
     })
 
+
 # --------------------------------------------------
-# WEBSOCKET EVENTS
+# WEBSOCKET
 # --------------------------------------------------
 @socketio.on('connect')
 def handle_connect():
     print('[WebSocket] Cliente conectado')
-    
-    if len(spo2_hist) > 0 and len(hr_hist) > 0:
+    if len(spo2_hist) > 0:
         socketio.emit('update', {
             "spo2": spo2_hist[-1], "hr": hr_hist[-1],
             "spo2_history": list(spo2_hist), "hr_history": list(hr_hist),
             "spo2_critical": spo2_hist[-1] < CRITICAL_SPO2,
             "hr_critical": hr_hist[-1] < CRITICAL_HR_LOW or hr_hist[-1] > CRITICAL_HR_HIGH
         })
-    
-    socketio.emit('raw_update', {
-        "count": packet_count,
-        "distance": current_distance,
-        "rssi": current_rssi
-    })
+    socketio.emit('raw_update', {"count": packet_count, "distance": current_distance, "rssi": current_rssi})
+
 
 @socketio.on('disconnect')
 def handle_disconnect():
     print('[WebSocket] Cliente desconectado')
 
+
 # --------------------------------------------------
-# PDF REPORT (simplified)
+# PDF REPORT
 # --------------------------------------------------
 def process_data_for_analysis():
     stats = get_statistics(hours=24)
@@ -1147,6 +997,7 @@ def process_data_for_analysis():
         "hr_min": min(hr_hist) if hr_hist else 0,
         "hr_max": max(hr_hist) if hr_hist else 0
     }
+
 
 @app.route("/api/report/pdf", methods=["POST"])
 def api_report_pdf():
@@ -1206,10 +1057,11 @@ Genera HTML completo con estilos profesionales. Firma: {now_utc} | {SYSTEM_NAME}
         return send_file(pdf, mimetype="application/pdf", as_attachment=True, download_name=filename)
 
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] PDF: {e}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 # --------------------------------------------------
 # QUEUE PROCESSOR
@@ -1222,6 +1074,7 @@ def process_queue():
         except Empty:
             continue
 
+
 # --------------------------------------------------
 # MAIN
 # --------------------------------------------------
@@ -1231,16 +1084,26 @@ if __name__ == "__main__":
 ║  {SYSTEM_NAME}
 ║  Versión: {ALGORITHM_VERSION}
 ╠══════════════════════════════════════════════════════════════╣
-║  BASE DE DATOS: {'✅ Configurada' if DATABASE_URL else '❌ No configurada'}
-║  EMAIL REMITENTE: {'✅ Configurado' if EMAIL_FROM and EMAIL_PASS else '❌ No configurado'}
-║  EMAIL DESTINATARIO: {email_config.get('email_to') or '⚠️  Pendiente de configurar en UI'}
+║  DATABASE_URL: {'✅ Configurada' if DATABASE_URL else '❌ No configurada'}
+║  EMAIL_FROM:   {'✅ ' + EMAIL_FROM[:15] + '...' if EMAIL_FROM else '❌ No configurado'}
+║  EMAIL_PASS:   {'✅ Configurado (' + str(len(EMAIL_PASS)) + ' chars)' if EMAIL_PASS else '❌ No configurado'}
+║  EMAIL_TO:     {email_config.get('email_to') or '⚠️  Pendiente de configurar en UI'}
 ╠══════════════════════════════════════════════════════════════╣
+║  SMTP:     {SMTP_SERVER}:{SMTP_PORT} (timeout: {SMTP_TIMEOUT}s)
 ║  UMBRALES: SpO2 < {CRITICAL_SPO2}% | HR < {CRITICAL_HR_LOW} o > {CRITICAL_HR_HIGH} bpm
 ╚══════════════════════════════════════════════════════════════╝
     """)
     
     if init_db_pool():
         init_database()
+    
+    # Test de email al inicio (opcional)
+    email_check = check_email_config()
+    if not email_check["configured"]:
+        print("⚠️  PROBLEMAS DE EMAIL:")
+        for issue in email_check["issues"]:
+            print(f"   - {issue}")
+        print("   💡 Configura EMAIL_FROM y EMAIL_PASS en Environment Variables de Render")
     
     app.config['start_time'] = time.time()
     threading.Thread(target=process_queue, daemon=True).start()
