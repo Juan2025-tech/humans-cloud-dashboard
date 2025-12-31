@@ -485,7 +485,7 @@ def send_alert_async(alert_type, spo2, hr):
 # ============================================================
 
 @app.route("/")
-def index(): return render_template("index.html")
+def index(): return render_template("index11.html")
 
 @app.route("/api/data", methods=["POST"])
 def receive_data():
@@ -647,20 +647,29 @@ def on_connect():
 def on_disconnect(): print('[WS] Desconectado')
 
 # ============================================================
-# MAIN
+# INICIALIZACIÓN (se ejecuta siempre, incluso con gunicorn)
 # ============================================================
 
-if __name__ == "__main__":
-    print(f"""
+print(f"""
 ╔══════════════════════════════════════════════════════════════╗
 ║  {SYSTEM_NAME}
 ║  Versión: {ALGORITHM_VERSION}
 ╠══════════════════════════════════════════════════════════════╣
-║  Informe PDF mejorado con análisis clínico:
-║  - Clasificación eventos clínicos vs artefactos
-║  - Estadísticas detalladas (percentiles, desviación)
-║  - Interpretación automática de resultados
+║  DATABASE_URL: {'✅ Configurado' if DATABASE_URL else '❌ No configurado'}
+║  RESEND_API_KEY: {'✅ Configurado' if RESEND_API_KEY else '❌ No configurado'}
+║  OPENAI_API_KEY: {'✅ Configurado' if os.environ.get('OPENAI_API_KEY') else '❌ No configurado'}
 ╚══════════════════════════════════════════════════════════════╝
-    """)
-    if init_db_pool(): init_database()
+""")
+
+# Inicializar base de datos al cargar el módulo
+if init_db_pool():
+    init_database()
+else:
+    print("⚠️ Ejecutando SIN base de datos (solo memoria)")
+
+# ============================================================
+# MAIN (solo para ejecución local directa)
+# ============================================================
+
+if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 5050)))
