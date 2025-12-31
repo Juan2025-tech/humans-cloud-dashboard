@@ -9,7 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
   <style>
-    body { font-family: "Segoe UI", sans-serif; background:#eef2f7; margin:0; padding:0; -webkit-font-smoothing:antialiased; }
+    body { font-family: "Segoe UI", sans-serif; background:#eef2f7; margin:0; padding:0; }
     .container { max-width:900px; margin:24px auto; padding:20px; background:#eaf6ff; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.08); }
     h1 { text-align:center; color:#123e66; margin:0 0 8px; }
     h2 { text-align:center; color:#123e66; margin:24px 0 12px; font-size:1.4em; }
@@ -17,7 +17,6 @@
     .status { display:inline-block; text-align:center; margin:10px auto; padding:6px 14px; border-radius:8px; font-weight:700; }
     .connected { background:white; color:#155724; border: 2px solid #155724; }
     .disconnected { background:white; color:#c92a2a; border:2px solid #c92a2a; }
-    .reconnecting { background:#fff3cd; color:#856404; border:2px solid #ffc107; }
 
     .top-row { display:flex; gap:20px; align-items:center; justify-content:center; margin-top:12px; }
     .big { text-align:center; min-width:160px; }
@@ -31,7 +30,16 @@
     .patient-box input.email-input { width: 220px; }
     .patient-box label { font-weight: 600; color: #34495e; margin-right: 6px; }
     
-    canvas { width:100% !important; height:320px !important; display:block; }
+    /* GRÁFICO MÁS GRANDE */
+    .chart-container { 
+      width: 100%; 
+      height: 500px; 
+      margin: 20px 0;
+    }
+    #dualChart { 
+      width: 100% !important; 
+      height: 100% !important;
+    }
 
     .controls { text-align:center; margin-top:12px; }
     .btn { padding:8px 14px; border-radius:8px; border:none; cursor:pointer; background:#1c70d6; color:white; font-weight:700; margin:6px 6px; }
@@ -41,104 +49,36 @@
     .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
     .alerting { box-shadow:0 0 0 8px rgba(231,76,60,0.10); border-radius:12px; animation: pulse 1s infinite; }
-    @keyframes pulse { 0% { box-shadow:0 0 0 0 rgba(231,76,60,0.0);} 50% { box-shadow:0 0 0 12px rgba(231,76,60,0.12);} 100% { box-shadow:0 0 0 0 rgba(231,76,60,0.0);} }
+    @keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(231,76,60,0);} 50% { box-shadow:0 0 0 12px rgba(231,76,60,0.12);} }
 
-    #loadingBox { margin-top:18px; padding:14px; background:white; border-radius:10px; display:none; text-align:center; box-shadow:0 6px 22px rgba(0,0,0,0.06); }
+    #loadingBox { margin-top:18px; padding:14px; background:white; border-radius:10px; display:none; text-align:center; }
     .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #1c70d6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
-    /* SECCIÓN DE ALERTAS EMAIL */
-    .alert-config-section { 
-      margin-top:20px; 
-      padding:16px; 
-      background: linear-gradient(135deg, #fff5f5 0%, #ffe8e8 100%);
-      border-radius:10px; 
-      box-shadow:0 6px 18px rgba(0,0,0,0.06);
-      border-left: 4px solid #dc3545;
-    }
-    .alert-config-section h2 { 
-      margin: 0 0 12px 0; 
-      color: #dc3545;
-      text-align: left;
-      font-size: 1.2em;
-    }
-    .alert-config-grid {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 12px;
-      align-items: center;
-    }
-    .email-status {
-      display: inline-block;
-      padding: 4px 10px;
-      border-radius: 12px;
-      font-size: 0.85em;
-      font-weight: 600;
-    }
+    .alert-config-section { margin-top:20px; padding:16px; background: linear-gradient(135deg, #fff5f5 0%, #ffe8e8 100%); border-radius:10px; border-left: 4px solid #dc3545; }
+    .alert-config-section h2 { margin: 0 0 12px 0; color: #dc3545; text-align: left; font-size: 1.2em; }
+    .alert-config-grid { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
+    .email-status { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
     .email-status.active { background: #d4edda; color: #155724; }
     .email-status.inactive { background: #f8d7da; color: #721c24; }
-    .threshold-info {
-      margin-top: 12px;
-      padding: 10px;
-      background: rgba(255,255,255,0.7);
-      border-radius: 6px;
-      font-size: 0.85em;
-      color: #495057;
-    }
+    .threshold-info { margin-top: 12px; padding: 10px; background: rgba(255,255,255,0.7); border-radius: 6px; font-size: 0.85em; color: #495057; }
     .threshold-info strong { color: #dc3545; }
 
-    /* DIAGNÓSTICO DE OPERACIONES */
-    .diagnostics-section { margin-top:24px; padding:16px; background:rgba(255,255,255,0.9); border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,0.06); }
+    .diagnostics-section { margin-top:24px; padding:16px; background:rgba(255,255,255,0.9); border-radius:10px; }
     .diagnostics-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-top:12px; }
     .diag-card { padding:10px; background:#f8f9fa; border-radius:6px; border-left:4px solid #1c70d6; }
     .diag-card .diag-label { font-size:0.85em; color:#6c757d; font-weight:600; margin-bottom:4px; }
     .diag-card .diag-value { font-size:1.8em; font-weight:700; color:#123e66; font-family:"Courier New", monospace; }
 
-    /* Debug panel */
-    .debug-panel {
-      margin-top: 20px;
-      padding: 10px;
-      background: #2d3436;
-      border-radius: 8px;
-      font-family: monospace;
-      font-size: 12px;
-      color: #00ff00;
-      max-height: 150px;
-      overflow-y: auto;
-    }
-    .debug-panel .debug-line { margin: 2px 0; }
-    .debug-panel .error { color: #ff6b6b; }
-    .debug-panel .warn { color: #feca57; }
-    .debug-panel .info { color: #54a0ff; }
-
-    /* Toast notification */
-    .toast {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      padding: 16px 24px;
-      background: #28a745;
-      color: white;
-      border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-      transform: translateY(100px);
-      opacity: 0;
-      transition: all 0.3s ease;
-      z-index: 1000;
-      font-weight: 600;
-    }
+    .toast { position: fixed; bottom: 20px; right: 20px; padding: 16px 24px; background: #28a745; color: white; border-radius: 8px; transform: translateY(100px); opacity: 0; transition: all 0.3s; z-index: 1000; font-weight: 600; }
     .toast.show { transform: translateY(0); opacity: 1; }
     .toast.error { background: #dc3545; }
 
     @media (max-width:768px) {
       .value { font-size:56px; }
-      .patient-box input { font-size: 12px; padding: 3px 6px; }
-      .patient-box input.email-input { width: 180px; }
+      .chart-container { height: 350px; }
       .diagnostics-grid { grid-template-columns: 1fr; }
       .alert-config-grid { grid-template-columns: 1fr; }
-    }
-    @media (max-width:520px) {
-      .diagnostics-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -147,22 +87,20 @@
     <h1>HumanS – Monitor Vital (AI Report)</h1>
     <div id="status" class="status disconnected">Conectando...</div>
 
-    <!-- DATOS DEL PACIENTE -->
     <div class="patient-box">
       <div>
         <label>Paciente:</label>
-        <input type="text" id="patientName" value="Paciente01" placeholder="Nombre del paciente">
+        <input type="text" id="patientName" value="Paciente01">
         &nbsp;&nbsp;
         <label>Edad:</label>
-        <input type="number" id="patientAge" value="81" placeholder="Edad" style="width: 60px;">
-        años
+        <input type="number" id="patientAge" value="81" style="width: 60px;"> años
       </div>
       <div style="margin-top: 8px;">
         <label>Residencia:</label>
-        <input type="text" id="patientResidence" value="Residencia Albareda" placeholder="Residencia">
+        <input type="text" id="patientResidence" value="Residencia Albareda">
         &nbsp;&nbsp;
         <label>Habitación:</label>
-        <input type="text" id="patientRoom" value="101" placeholder="Habitación" style="width: 80px;">
+        <input type="text" id="patientRoom" value="101" style="width: 80px;">
       </div>
     </div>
 
@@ -171,14 +109,16 @@
         <div class="label">SpO₂ (%)</div>
         <div id="spo2" class="value">--</div>
       </div>
-
       <div class="big">
         <div class="label">HR (bpm)</div>
         <div id="hr" class="value">--</div>
       </div>
     </div>
 
-    <canvas id="dualChart"></canvas>
+    <!-- GRÁFICO MÁS GRANDE -->
+    <div class="chart-container">
+      <canvas id="dualChart"></canvas>
+    </div>
 
     <div class="controls">
       <button id="pauseBtn" class="btn secondary">Pausar</button>
@@ -191,315 +131,105 @@
       <p>Generando informe médico con IA...</p>
     </div>
 
-    <!-- SECCIÓN DE CONFIGURACIÓN DE ALERTAS EMAIL -->
+    <!-- ALERTAS EMAIL -->
     <div class="alert-config-section">
       <h2>📧 Configuración de Alertas por Email</h2>
-      
       <div class="alert-config-grid">
         <div>
           <label for="alertEmail">Email de notificación:</label>
-          <input type="email" id="alertEmail" class="email-input" 
-                 placeholder="correo@ejemplo.com" 
-                 value="">
+          <input type="email" id="alertEmail" class="email-input" placeholder="correo@ejemplo.com">
         </div>
         <div>
-          <button id="saveEmailBtn" class="btn email-btn">💾 Guardar Email</button>
+          <button id="saveEmailBtn" class="btn email-btn">💾 Guardar</button>
           <button id="testEmailBtn" class="btn secondary">📤 Probar</button>
         </div>
       </div>
-      
       <div style="margin-top: 10px;">
         <span class="email-status inactive" id="emailStatus">❌ No configurado</span>
-        <span id="currentEmailDisplay" style="margin-left: 10px; color: #6c757d; font-size: 0.9em;"></span>
+        <span id="currentEmailDisplay" style="margin-left: 10px; color: #6c757d;"></span>
       </div>
-
       <div class="threshold-info">
-        <strong>⚠️ Umbrales de alerta:</strong> 
-        Se enviará un email cuando SpO₂ < <strong id="thresholdSpo2">92</strong>% 
-        o cuando HR < <strong id="thresholdHrLow">60</strong> 
-        o HR > <strong id="thresholdHrHigh">150</strong> bpm.
-        <br>
-        <small>El email incluirá los datos del paciente, valores actuales y una tabla con las estadísticas de la sesión.</small>
+        <strong>⚠️ Umbrales:</strong> 
+        SpO₂ < <strong id="thresholdSpo2">92</strong>% | 
+        HR < <strong id="thresholdHrLow">60</strong> o > <strong id="thresholdHrHigh">150</strong> bpm
       </div>
     </div>
 
-    <!-- SECCIÓN DE DIAGNÓSTICO DE OPERACIONES -->
+    <!-- DIAGNÓSTICO -->
     <div class="diagnostics-section">
-      <h2>🔧 Diagnóstico de Operaciones BLE</h2>
-      
+      <h2>🔧 Diagnóstico BLE</h2>
       <div class="diagnostics-grid">
         <div class="diag-card">
           <div class="diag-label">Paquetes Recibidos</div>
           <div class="diag-value" id="packetCount">0</div>
         </div>
-        
         <div class="diag-card" style="border-left-color: #28a745;">
-          <div class="diag-label">Distancia (metros)</div>
+          <div class="diag-label">Distancia (m)</div>
           <div class="diag-value" id="distance">--</div>
         </div>
-        
         <div class="diag-card" style="border-left-color: #ffc107;">
           <div class="diag-label">RSSI (dBm)</div>
           <div class="diag-value" id="rssi">--</div>
         </div>
       </div>
-      
-      <div style="margin-top:12px; padding:10px; background:#e7f3ff; border-radius:6px; font-size:0.85em; color:#123e66;">
-        <strong>ℹ️ Información:</strong> La distancia se calcula basándose en la intensidad de señal RSSI. 
-        Valores típicos: &lt;1m (excelente) | 1-3m (bueno) | &gt;3m (débil).
-      </div>
-    </div>
-
-    <!-- DEBUG PANEL (toggle with Ctrl+D) -->
-    <div class="debug-panel" id="debugPanel" style="display:none;">
-      <div class="debug-line info">🔧 Panel de depuración (Ctrl+D para ocultar)</div>
     </div>
   </div>
 
-  <!-- Toast notification -->
   <div id="toast" class="toast"></div>
 
   <script>
-    // =====================================================
-    // DEBUG UTILITIES
-    // =====================================================
-    const debugPanel = document.getElementById('debugPanel');
-    let debugEnabled = false;
-
-    function debugLog(msg, type = 'info') {
-      const time = new Date().toLocaleTimeString();
-      console.log(`[${type.toUpperCase()}] ${msg}`);
-      
-      if (debugEnabled) {
-        const line = document.createElement('div');
-        line.className = `debug-line ${type}`;
-        line.textContent = `[${time}] ${msg}`;
-        debugPanel.appendChild(line);
-        debugPanel.scrollTop = debugPanel.scrollHeight;
-        
-        // Keep only last 50 lines
-        while (debugPanel.children.length > 50) {
-          debugPanel.removeChild(debugPanel.firstChild);
-        }
-      }
+    function showToast(msg, isError=false) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast' + (isError ? ' error' : '');
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 3000);
     }
 
-    // Toggle debug panel with Ctrl+D
-    document.addEventListener('keydown', (e) => {
-      if (e.ctrlKey && e.key === 'd') {
-        e.preventDefault();
-        debugEnabled = !debugEnabled;
-        debugPanel.style.display = debugEnabled ? 'block' : 'none';
-        debugLog('Panel de debug ' + (debugEnabled ? 'activado' : 'desactivado'));
-      }
-    });
-
-    window.addEventListener('error', (ev) => debugLog(`Error global: ${ev.message}`, 'error'));
-
-    // =====================================================
-    // TOAST NOTIFICATION
-    // =====================================================
-    function showToast(message, isError = false) {
-      const toast = document.getElementById('toast');
-      toast.textContent = message;
-      toast.className = 'toast' + (isError ? ' error' : '');
-      toast.classList.add('show');
-      setTimeout(() => toast.classList.remove('show'), 3000);
-    }
-
-    // =====================================================
-    // SOCKET CONNECTION WITH AUTO-RECONNECT
-    // =====================================================
+    // Socket
     let socket = null;
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT_ATTEMPTS = 10;
-
-    function initSocket() {
-      debugLog('Inicializando Socket.IO...');
-      
-      try {
-        if (typeof io === 'undefined') {
-          debugLog('Socket.IO no disponible, usando fallback', 'error');
-          socket = { on: () => {}, emit: () => {} };
-          return;
-        }
-
-        // Determinar URL del servidor
-        const serverUrl = window.location.origin;
-        debugLog(`Conectando a: ${serverUrl}`);
-
-        socket = io(serverUrl, {
-          transports: ['websocket', 'polling'],
-          reconnection: true,
-          reconnectionAttempts: MAX_RECONNECT_ATTEMPTS,
-          reconnectionDelay: 1000,
-          reconnectionDelayMax: 5000,
-          timeout: 20000
-        });
-
-        // Connection events
-        socket.on('connect', () => {
-          debugLog('✅ Socket conectado', 'info');
-          reconnectAttempts = 0;
-          updateConnectionStatus('connected', 'Conectado');
-          fetchEmailConfig();
-        });
-
-        socket.on('disconnect', (reason) => {
-          debugLog(`❌ Socket desconectado: ${reason}`, 'warn');
-          updateConnectionStatus('disconnected', 'Desconectado');
-        });
-
-        socket.on('connect_error', (error) => {
-          debugLog(`Error de conexión: ${error.message}`, 'error');
-          reconnectAttempts++;
-          updateConnectionStatus('reconnecting', `Reconectando (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
-        });
-
-        socket.on('reconnect', (attemptNumber) => {
-          debugLog(`Reconectado después de ${attemptNumber} intentos`, 'info');
-          showToast('✅ Conexión restablecida');
-        });
-
-        socket.on('reconnect_failed', () => {
-          debugLog('Falló la reconexión después de todos los intentos', 'error');
-          showToast('❌ No se pudo reconectar al servidor', true);
-        });
-
-        // Data events
-        socket.on('update', handleDataUpdate);
-        socket.on('raw_update', handleRawUpdate);
-        socket.on('alert_sent', handleAlertSent);
-
-      } catch (e) {
-        debugLog(`Error inicializando socket: ${e.message}`, 'error');
-        socket = { on: () => {}, emit: () => {} };
-      }
+    try {
+      socket = typeof io !== 'undefined' ? io() : { on: ()=>{}, emit: ()=>{} };
+    } catch(e) {
+      socket = { on: ()=>{}, emit: ()=>{} };
     }
 
-    function updateConnectionStatus(status, text) {
-      const st = document.getElementById('status');
-      st.textContent = text;
-      st.className = `status ${status}`;
-    }
-
-    // =====================================================
-    // DATA HANDLERS
-    // =====================================================
-    let paused = false;
-    let lastUpdateTime = null;
-
-    function handleDataUpdate(data) {
-      if (paused) return;
-      
-      try {
-        lastUpdateTime = new Date();
-        debugLog(`Datos recibidos: SpO2=${data.spo2}% HR=${data.hr}bpm`);
-
-        const spo2El = document.getElementById('spo2');
-        const hrEl = document.getElementById('hr');
-        
-        spo2El.textContent = data.spo2 ?? '--';
-        hrEl.textContent = data.hr ?? '--';
-        spo2El.className = 'value ' + (data.spo2_critical ? 'warn' : 'good');
-        hrEl.className = 'value ' + (data.hr_critical ? 'warn' : 'good');
-
-        if (dualChart && data.spo2_history && data.hr_history) {
-          const labels = data.spo2_history.map((_, i) => i);
-          dualChart.data.labels = labels;
-          dualChart.data.datasets[0].data = data.spo2_history;
-          dualChart.data.datasets[1].data = data.hr_history;
-          dualChart.update('none'); // 'none' para mejor rendimiento
-        }
-
-        if (data.spo2_critical || data.hr_critical) {
-          setAlertOn(true);
-          playAlertBeep();
-        } else {
-          setAlertOn(false);
-        }
-      } catch (e) {
-        debugLog(`Error procesando update: ${e.message}`, 'error');
-      }
-    }
-
-    function handleRawUpdate(data) {
-      try {
-        document.getElementById('packetCount').textContent = data.count || 0;
-        
-        const distanceEl = document.getElementById('distance');
-        if (data.distance !== undefined && data.distance !== null) {
-          distanceEl.textContent = data.distance.toFixed(2) + 'm';
-          
-          const card = distanceEl.closest('.diag-card');
-          if (data.distance < 1) {
-            card.style.borderLeftColor = '#28a745';
-          } else if (data.distance < 3) {
-            card.style.borderLeftColor = '#ffc107';
-          } else {
-            card.style.borderLeftColor = '#dc3545';
-          }
-        } else {
-          distanceEl.textContent = '--';
-        }
-        
-        const rssiEl = document.getElementById('rssi');
-        if (data.rssi !== undefined && data.rssi !== null) {
-          rssiEl.textContent = data.rssi;
-        } else {
-          rssiEl.textContent = '--';
-        }
-      } catch (e) {
-        debugLog(`Error procesando raw_update: ${e.message}`, 'error');
-      }
-    }
-
-    function handleAlertSent(data) {
-      debugLog(`Alerta enviada: ${data.type} - ${data.message}`);
-      showToast(`📧 Alerta enviada: ${data.type} - ${data.message}`);
-    }
-
-    // =====================================================
-    // CHART CONFIGURATION
-    // =====================================================
+    // Gráfico
     let dualChart = null;
-    
-    function initChart() {
-      try {
-        const ctx = document.getElementById('dualChart').getContext('2d');
-        dualChart = new Chart(ctx, {
-          type: 'line',
-          data: {
-            labels: [],
-            datasets: [
-              { label: 'SpO₂', data: [], borderColor: '#0074D9', tension: 0.2, yAxisID: 'y', pointRadius: 0 },
-              { label: 'HR', data: [], borderColor: '#FF4136', tension: 0.2, yAxisID: 'y1', pointRadius: 0 }
-            ]
+    try {
+      const ctx = document.getElementById('dualChart').getContext('2d');
+      dualChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [
+            { label: 'SpO₂', data: [], borderColor: '#0074D9', borderWidth: 2, tension: 0.2, yAxisID: 'y', pointRadius: 1 },
+            { label: 'HR', data: [], borderColor: '#FF4136', borderWidth: 2, tension: 0.2, yAxisID: 'y1', pointRadius: 1 }
+          ]
+        },
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { position: 'top', labels: { font: { size: 14 } } }
           },
-          options: {
-            animation: false,
-            responsive: true,
-            maintainAspectRatio: false,
-            interaction: { mode: 'index', intersect: false },
-            scales: {
-              y: { type: 'linear', position: 'left', min: 60, max: 100, title: { display: true, text: 'SpO₂ %' } },
-              y1: { type: 'linear', position: 'right', min: 30, max: 180, grid: { drawOnChartArea: false }, title: { display: true, text: 'HR bpm' } }
-            }
+          scales: {
+            y: { type: 'linear', position: 'left', min: 60, max: 100, 
+                 title: { display: true, text: 'SpO₂ %', font: { size: 14 } } },
+            y1: { type: 'linear', position: 'right', min: 30, max: 180, 
+                  grid: { drawOnChartArea: false }, 
+                  title: { display: true, text: 'HR bpm', font: { size: 14 } } }
           }
-        });
-        debugLog('Gráfico inicializado');
-      } catch (e) {
-        debugLog(`Error inicializando gráfico: ${e.message}`, 'error');
-      }
-    }
+        }
+      });
+    } catch(e) { console.warn('Chart error:', e); }
 
-    // =====================================================
-    // CONTROLS
-    // =====================================================
+    let paused = false;
     document.getElementById('pauseBtn').onclick = () => {
       paused = !paused;
       document.getElementById('pauseBtn').textContent = paused ? 'Reanudar' : 'Pausar';
-      debugLog(`Monitoreo ${paused ? 'pausado' : 'reanudado'}`);
     };
 
     document.getElementById('clearBtn').onclick = () => {
@@ -511,85 +241,62 @@
       }
       document.getElementById('spo2').textContent = '--';
       document.getElementById('hr').textContent = '--';
-      debugLog('Historial borrado');
     };
 
-    // =====================================================
-    // AUDIO ALERTS
-    // =====================================================
+    // Audio
     let audioCtx = null;
-    function playAlertBeep(repeat = 1) {
+    function playAlertBeep() {
       try {
         if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        for (let i = 0; i < repeat; i++) {
-          const o = audioCtx.createOscillator();
-          const g = audioCtx.createGain();
-          o.type = 'sine';
-          o.frequency.value = 900;
-          g.gain.value = 0.12;
-          o.connect(g);
-          g.connect(audioCtx.destination);
-          const start = window.performance.now() + i * 250;
-          o.start(start / 1000);
-          setTimeout(() => { try { o.stop(); } catch (e) {} }, 520 + i * 250);
-        }
-      } catch (e) {
-        debugLog(`Error de audio: ${e.message}`, 'warn');
-      }
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.type = 'sine'; o.frequency.value = 900; g.gain.value = 0.12;
+        o.connect(g); g.connect(audioCtx.destination);
+        o.start(); setTimeout(() => o.stop(), 200);
+      } catch(e) {}
     }
 
     const mainCard = document.getElementById('mainCard');
-    function setAlertOn(on) {
-      on ? mainCard.classList.add('alerting') : mainCard.classList.remove('alerting');
-    }
+    function setAlertOn(on) { on ? mainCard.classList.add('alerting') : mainCard.classList.remove('alerting'); }
 
-    // =====================================================
-    // EMAIL CONFIGURATION
-    // =====================================================
+    // Socket events
+    socket.on('update', data => {
+      if (paused) return;
+      document.getElementById('spo2').textContent = data.spo2 ?? '--';
+      document.getElementById('hr').textContent = data.hr ?? '--';
+      document.getElementById('spo2').className = 'value ' + (data.spo2_critical ? 'warn' : 'good');
+      document.getElementById('hr').className = 'value ' + (data.hr_critical ? 'warn' : 'good');
+
+      if (dualChart && data.spo2_history && data.hr_history) {
+        dualChart.data.labels = data.spo2_history.map((_, i) => i);
+        dualChart.data.datasets[0].data = data.spo2_history;
+        dualChart.data.datasets[1].data = data.hr_history;
+        dualChart.update('none');
+      }
+
+      if (data.spo2_critical || data.hr_critical) { setAlertOn(true); playAlertBeep(); }
+      else { setAlertOn(false); }
+    });
+
+    socket.on('raw_update', data => {
+      document.getElementById('packetCount').textContent = data.count || 0;
+      const distEl = document.getElementById('distance');
+      if (data.distance != null) {
+        distEl.textContent = data.distance + 'm';
+        const card = distEl.closest('.diag-card');
+        card.style.borderLeftColor = data.distance < 1 ? '#28a745' : data.distance < 3 ? '#ffc107' : '#dc3545';
+      } else { distEl.textContent = '--'; }
+      document.getElementById('rssi').textContent = data.rssi ?? '--';
+    });
+
+    socket.on('alert_sent', data => showToast(`📧 ${data.message}`));
+    socket.on('connect', () => { document.getElementById('status').textContent = "Conectado"; document.getElementById('status').className = "status connected"; fetchEmailConfig(); });
+    socket.on('disconnect', () => { document.getElementById('status').textContent = "Desconectado"; document.getElementById('status').className = "status disconnected"; });
+
+    // Email config
     const alertEmailInput = document.getElementById('alertEmail');
-    const saveEmailBtn = document.getElementById('saveEmailBtn');
-    const testEmailBtn = document.getElementById('testEmailBtn');
     const emailStatus = document.getElementById('emailStatus');
     const currentEmailDisplay = document.getElementById('currentEmailDisplay');
-
-    function loadSavedEmail() {
-      const savedEmail = localStorage.getItem('alertEmail');
-      if (savedEmail) {
-        alertEmailInput.value = savedEmail;
-        updateEmailStatus(savedEmail);
-      }
-      fetchEmailConfig();
-    }
-
-    async function fetchEmailConfig() {
-      try {
-        debugLog('Obteniendo configuración de email...');
-        const response = await fetch('/api/email/config');
-        if (response.ok) {
-          const data = await response.json();
-          debugLog(`Config email: ${JSON.stringify(data)}`);
-          
-          if (data.email_to) {
-            alertEmailInput.value = data.email_to;
-            localStorage.setItem('alertEmail', data.email_to);
-            updateEmailStatus(data.email_to);
-          }
-          
-          if (data.thresholds) {
-            document.getElementById('thresholdSpo2').textContent = data.thresholds.spo2_critical || 92;
-            document.getElementById('thresholdHrLow').textContent = data.thresholds.hr_low || 60;
-            document.getElementById('thresholdHrHigh').textContent = data.thresholds.hr_high || 150;
-          }
-          
-          // Show SMTP issues if any
-          if (data.smtp_issues && data.smtp_issues.length > 0) {
-            debugLog(`SMTP issues: ${data.smtp_issues.join(', ')}`, 'warn');
-          }
-        }
-      } catch (e) {
-        debugLog(`Error obteniendo config email: ${e.message}`, 'error');
-      }
-    }
 
     function updateEmailStatus(email) {
       if (email && email.includes('@')) {
@@ -603,172 +310,85 @@
       }
     }
 
-    function isValidEmail(email) {
-      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+    async function fetchEmailConfig() {
+      try {
+        const r = await fetch('/api/email/config');
+        if (r.ok) {
+          const data = await r.json();
+          if (data.email_to) { alertEmailInput.value = data.email_to; updateEmailStatus(data.email_to); }
+          if (data.thresholds) {
+            document.getElementById('thresholdSpo2').textContent = data.thresholds.spo2_critical || 92;
+            document.getElementById('thresholdHrLow').textContent = data.thresholds.hr_low || 60;
+            document.getElementById('thresholdHrHigh').textContent = data.thresholds.hr_high || 150;
+          }
+        }
+      } catch(e) {}
     }
 
-    saveEmailBtn.addEventListener('click', async () => {
+    document.getElementById('saveEmailBtn').addEventListener('click', async () => {
       const email = alertEmailInput.value.trim();
-      
-      if (!email) {
-        showToast('Por favor, introduce un email', true);
-        return;
-      }
-      
-      if (!isValidEmail(email)) {
-        showToast('Formato de email inválido', true);
-        return;
-      }
-
-      saveEmailBtn.disabled = true;
-      saveEmailBtn.textContent = '⏳ Guardando...';
-
+      if (!email || !email.includes('@')) { showToast('Email inválido', true); return; }
+      const btn = document.getElementById('saveEmailBtn');
+      btn.disabled = true; btn.textContent = '⏳';
       try {
-        const response = await fetch('/api/email/config', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            email_to: email,
-            patient_name: document.getElementById('patientName').value,
-            patient_room: document.getElementById('patientRoom').value,
-            patient_residence: document.getElementById('patientResidence').value
-          })
+        const r = await fetch('/api/email/config', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ email_to: email, patient_name: document.getElementById('patientName').value,
+                                patient_room: document.getElementById('patientRoom').value,
+                                patient_residence: document.getElementById('patientResidence').value })
         });
-
-        const result = await response.json();
-
-        if (response.ok) {
-          localStorage.setItem('alertEmail', email);
-          updateEmailStatus(email);
-          showToast('✅ Email guardado correctamente');
-          debugLog(`Email guardado: ${email}`);
-        } else {
-          showToast(result.error || 'Error al guardar', true);
-          debugLog(`Error guardando email: ${result.error}`, 'error');
-        }
-      } catch (error) {
-        debugLog(`Error de conexión: ${error.message}`, 'error');
-        showToast('Error de conexión', true);
-      } finally {
-        saveEmailBtn.disabled = false;
-        saveEmailBtn.textContent = '💾 Guardar Email';
-      }
+        if (r.ok) { updateEmailStatus(email); showToast('✅ Email guardado'); }
+        else { const e = await r.json(); showToast(e.error || 'Error', true); }
+      } catch(e) { showToast('Error de conexión', true); }
+      finally { btn.disabled = false; btn.textContent = '💾 Guardar'; }
     });
 
-    testEmailBtn.addEventListener('click', async () => {
+    document.getElementById('testEmailBtn').addEventListener('click', async () => {
       const email = alertEmailInput.value.trim();
-      
-      if (!email || !isValidEmail(email)) {
-        showToast('Primero guarda un email válido', true);
-        return;
-      }
-
-      testEmailBtn.disabled = true;
-      testEmailBtn.textContent = '⏳ Enviando...';
-      debugLog(`Enviando email de prueba a ${email}...`);
-
+      if (!email) { showToast('Configura un email primero', true); return; }
+      const btn = document.getElementById('testEmailBtn');
+      btn.disabled = true; btn.textContent = '⏳';
       try {
-        const response = await fetch('/api/email/test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            email_to: email,
-            patient_name: document.getElementById('patientName').value
-          })
+        const r = await fetch('/api/email/test', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ email_to: email, patient_name: document.getElementById('patientName').value })
         });
-
-        const result = await response.json();
-
-        if (response.ok) {
-          showToast(`✅ Email de prueba enviado a ${email}`);
-          debugLog('Email de prueba enviado OK');
-        } else {
-          const errorMsg = result.error || 'Error al enviar';
-          showToast(errorMsg, true);
-          debugLog(`Error enviando email: ${errorMsg}`, 'error');
-          if (result.hint) {
-            debugLog(`Hint: ${result.hint}`, 'warn');
-          }
-        }
-      } catch (error) {
-        debugLog(`Error de conexión: ${error.message}`, 'error');
-        showToast('Error de conexión', true);
-      } finally {
-        testEmailBtn.disabled = false;
-        testEmailBtn.textContent = '📤 Probar';
-      }
+        const data = await r.json();
+        if (r.ok) { showToast(data.message || '✅ Email enviado'); }
+        else { showToast(data.error || 'Error', true); }
+      } catch(e) { showToast('Error de conexión', true); }
+      finally { btn.disabled = false; btn.textContent = '📤 Probar'; }
     });
 
-    // =====================================================
-    // PDF REPORT GENERATION
-    // =====================================================
-    const reportBtn = document.getElementById('reportBtn');
-    const loadingBox = document.getElementById('loadingBox');
-
-    reportBtn.addEventListener('click', async () => {
-      reportBtn.disabled = true;
-      loadingBox.style.display = 'block';
-      debugLog('Generando informe PDF...');
-
+    // PDF Report
+    document.getElementById('reportBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('reportBtn');
+      const loadingBox = document.getElementById('loadingBox');
+      btn.disabled = true; loadingBox.style.display = 'block';
       try {
-        const patientData = {
-          name: document.getElementById('patientName').value || 'No especificado',
-          age: document.getElementById('patientAge').value || 'No especificado',
-          residence: document.getElementById('patientResidence').value || 'No especificado',
-          room: document.getElementById('patientRoom').value || 'No especificado'
-        };
-
-        const response = await fetch('/api/report/pdf', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(patientData)
+        const r = await fetch('/api/report/pdf', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            name: document.getElementById('patientName').value,
+            age: document.getElementById('patientAge').value,
+            residence: document.getElementById('patientResidence').value,
+            room: document.getElementById('patientRoom').value
+          })
         });
-
-        if (response.ok) {
-          const blob = await response.blob();
+        if (r.ok) {
+          const blob = await r.blob();
           const url = window.URL.createObjectURL(blob);
           const a = document.createElement('a');
-          a.href = url;
-          a.download = `informe_medico_${new Date().toISOString().slice(0, 10)}.pdf`;
-          document.body.appendChild(a);
-          a.click();
-          window.URL.revokeObjectURL(url);
-          a.remove();
-          showToast('✅ Informe médico descargado');
-          debugLog('PDF descargado OK');
-        } else {
-          const errorText = await response.text();
-          debugLog(`Error generando PDF: ${errorText}`, 'error');
-          showToast('Error al generar el informe', true);
-        }
-      } catch (error) {
-        debugLog(`Error: ${error.message}`, 'error');
-        showToast(`Error de conexión: ${error.message}`, true);
-      } finally {
-        reportBtn.disabled = false;
-        loadingBox.style.display = 'none';
-      }
+          a.href = url; a.download = `informe_${new Date().toISOString().slice(0,10)}.pdf`;
+          a.click(); window.URL.revokeObjectURL(url);
+          showToast('✅ Informe descargado');
+        } else { showToast('Error al generar informe', true); }
+      } catch(e) { showToast('Error de conexión', true); }
+      finally { btn.disabled = false; loadingBox.style.display = 'none'; }
     });
 
-    // =====================================================
-    // INITIALIZATION
-    // =====================================================
-    document.addEventListener('DOMContentLoaded', () => {
-      debugLog('Inicializando aplicación...');
-      initChart();
-      initSocket();
-      loadSavedEmail();
-      
-      // Check for stale data every 30 seconds
-      setInterval(() => {
-        if (lastUpdateTime) {
-          const secondsSinceUpdate = (new Date() - lastUpdateTime) / 1000;
-          if (secondsSinceUpdate > 30) {
-            debugLog(`Sin datos por ${Math.round(secondsSinceUpdate)}s`, 'warn');
-          }
-        }
-      }, 30000);
-    });
+    // Init
+    fetchEmailConfig();
   </script>
 </body>
 </html>
