@@ -2,13 +2,15 @@
 """
 HumanS - Monitorización Vital Continua
 ======================================
-Versión: 1.8.0-improved-report
+Versión: 1.9.0-enhanced-report
 
-CAMBIOS:
-- Informe médico PDF mejorado con análisis clínico
-- Clasificación de eventos clínicos vs artefactos
-- Prompt profesional para LLM
-- Resend API para emails
+CAMBIOS v1.9.0:
+- Análisis por períodos de 8 horas (Noche/Mañana/Tarde)
+- Evaluación automática de nivel de riesgo (BAJO/MODERADO/ALTO/CRÍTICO)
+- Análisis de tendencias temporales (SpO2 y FC)
+- System prompt médico especializado
+- Reducción de 50 a 10 últimos registros (eficiencia de tokens)
+- Prompt mejorado con estructura clínica profesional
 """
 
 import eventlet
@@ -42,7 +44,7 @@ client = OpenAI()
 LLM_MODEL = "gpt-4o-mini"
 
 SYSTEM_NAME = "HumanS – Monitorización Vital Continua"
-ALGORITHM_VERSION = "1.8.0-improved-report"
+ALGORITHM_VERSION = "1.9.0-enhanced-report"
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
 EMAIL_FROM = os.environ.get("EMAIL_FROM", "HumanS <onboarding@resend.dev>")
@@ -205,6 +207,212 @@ def classify_spo2_episodes(spo2_list, hr_list, threshold=92):
     
     return clinical, artifacts
 
+
+def get_8hour_periods(hours=24):
+    """
+    Obtiene estadísticas por períodos de 8 horas.
+    Retorna lista de diccionarios con stats de cada período.
+    """
+    from collections import defaultdict
+    
+    if not db_pool:
+        # Sin base de datos: usar datos en memoria (sesión actual)
+        if not spo2_hist or len(spo2_hist) < 10:
+            return []
+        
+        # Simular un único período con los datos actuales
+        spo2_arr = np.array(list(spo2_hist))
+        hr_arr = np.array(list(hr_hist))
+        now = datetime.now(timezone.utc)
+        
+        return [{
+            "period_name": "Sesión actual",
+            "date": now.strftime("%Y-%m-%d"),
+            "start": "Inicio sesión",
+            "end": now.strftime("%H:%M"),
+            "samples": len(spo2_arr),
+            "spo2_min": int(np.min(spo2_arr)),
+            "spo2_max": int(np.max(spo2_arr)),
+            "spo2_avg": round(float(np.mean(spo2_arr)), 1),
+            "hr_min": int(np.min(hr_arr)),
+            "hr_max": int(np.max(hr_arr)),
+            "hr_avg": round(float(np.mean(hr_arr)), 1),
+        }]
+    
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(f"""
+                SELECT spo2, hr, timestamp 
+                FROM vital_signs 
+                WHERE timestamp > NOW() - INTERVAL '{hours} hours'
+                ORDER BY timestamp ASC
+            """)
+            rows = cur.fetchall()
+            
+            if not rows:
+                return []
+            
+            # Agrupar por períodos de 8 horas
+            periods = defaultdict(list)
+            
+            for row in rows:
+                ts = row['timestamp']
+                hour = ts.hour
+                if hour < 8:
+                    period_name = "Noche (00:00-08:00)"
+                elif hour < 16:
+                    period_name = "Mañana (08:00-16:00)"
+                else:
+                    period_name = "Tarde (16:00-24:00)"
+                
+                key = f"{ts.strftime('%Y-%m-%d')}_{period_name}"
+                periods[key].append({
+                    'spo2': row['spo2'],
+                    'hr': row['hr'],
+                    'timestamp': ts,
+                    'period_name': period_name
+                })
+            
+            result = []
+            for key, data in sorted(periods.items()):
+                if len(data) < 5:
+                    continue
+                    
+                spo2_vals = [d['spo2'] for d in data]
+                hr_vals = [d['hr'] for d in data]
+                
+                result.append({
+                    "period_name": data[0]['period_name'],
+                    "date": data[0]['timestamp'].strftime("%Y-%m-%d"),
+                    "start": data[0]['timestamp'].strftime("%H:%M"),
+                    "end": data[-1]['timestamp'].strftime("%H:%M"),
+                    "samples": len(data),
+                    "spo2_min": int(np.min(spo2_vals)),
+                    "spo2_max": int(np.max(spo2_vals)),
+                    "spo2_avg": round(float(np.mean(spo2_vals)), 1),
+                    "hr_min": int(np.min(hr_vals)),
+                    "hr_max": int(np.max(hr_vals)),
+                    "hr_avg": round(float(np.mean(hr_vals)), 1),
+                })
+            
+            return result
+            
+    except Exception as e:
+        print(f"[ERROR] get_8hour_periods: {e}")
+        return []
+    finally:
+        release_db_connection(conn)
+
+
+def calculate_trend(values):
+    """Calcula tendencia temporal: mejorando, estable, empeorando."""
+    if not values or len(values) < 6:
+        return "Datos insuficientes"
+    
+    mid = len(values) // 2
+    first_half = np.mean(values[:mid])
+    second_half = np.mean(values[mid:])
+    
+    diff = second_half - first_half
+    
+    if abs(diff) < 1:
+        return "Estable"
+    elif diff > 0:
+        return f"Ascendente (+{diff:.1f})"
+    else:
+        return f"Descendente ({diff:.1f})"
+
+
+def assess_risk_level(summary):
+    """Evalúa nivel de riesgo global del paciente."""
+    score = 0
+    reasons = []
+    
+    # SpO2
+    if summary['spo2_avg'] < 88:
+        score += 4
+        reasons.append("SpO2 media muy baja")
+    elif summary['spo2_avg'] < 90:
+        score += 3
+        reasons.append("SpO2 media baja")
+    elif summary['spo2_avg'] < 92:
+        score += 2
+        reasons.append("SpO2 media límite")
+    elif summary['spo2_avg'] < 94:
+        score += 1
+    
+    if summary['spo2_clinical_events'] >= 3:
+        score += 3
+        reasons.append(f"{summary['spo2_clinical_events']} eventos de hipoxemia")
+    elif summary['spo2_clinical_events'] > 0:
+        score += summary['spo2_clinical_events']
+    
+    if summary['spo2_p5'] < 85:
+        score += 3
+        reasons.append("Nadir SpO2 crítico")
+    elif summary['spo2_p5'] < 88:
+        score += 2
+        reasons.append("Nadir SpO2 bajo")
+    elif summary['spo2_p5'] < 90:
+        score += 1
+    
+    pct_below_90 = 100 * summary['spo2_below_90'] / max(summary['total_samples'], 1)
+    if pct_below_90 > 10:
+        score += 2
+        reasons.append(f"{pct_below_90:.1f}% tiempo en hipoxemia")
+    elif pct_below_90 > 5:
+        score += 1
+    
+    # FC
+    if summary['hr_avg'] < 50 or summary['hr_avg'] > 120:
+        score += 3
+        reasons.append("FC media muy alterada")
+    elif summary['hr_avg'] < 55 or summary['hr_avg'] > 110:
+        score += 2
+        reasons.append("FC media alterada")
+    elif summary['hr_avg'] < 60 or summary['hr_avg'] > 100:
+        score += 1
+    
+    pct_brady = 100 * summary['hr_bradycardia'] / max(summary['total_samples'], 1)
+    pct_tachy = 100 * summary['hr_tachycardia'] / max(summary['total_samples'], 1)
+    
+    if pct_brady > 20:
+        score += 2
+        reasons.append("Bradicardia frecuente")
+    elif pct_brady > 10:
+        score += 1
+    
+    if pct_tachy > 20:
+        score += 2
+        reasons.append("Taquicardia frecuente")
+    elif pct_tachy > 10:
+        score += 1
+    
+    if summary['spo2_std'] > 5:
+        score += 1
+        reasons.append("Alta variabilidad SpO2")
+    
+    if score >= 7:
+        level, emoji, action = "CRÍTICO", "🔴", "Requiere evaluación médica urgente"
+    elif score >= 5:
+        level, emoji, action = "ALTO", "🟠", "Evaluación médica recomendada en 24h"
+    elif score >= 3:
+        level, emoji, action = "MODERADO", "🟡", "Vigilancia estrecha, considerar consulta"
+    else:
+        level, emoji, action = "BAJO", "🟢", "Continuar monitorización rutinaria"
+    
+    return {
+        "level": level,
+        "emoji": emoji,
+        "action": action,
+        "score": score,
+        "reasons": reasons if reasons else ["Parámetros dentro de rangos normales"]
+    }
+
 def get_vital_signs_for_report(hours=24):
     """Obtiene datos vitales para el informe"""
     if not db_pool:
@@ -274,7 +482,7 @@ def get_vital_signs_for_report(hours=24):
         release_db_connection(conn)
 
 def process_data_for_analysis(hours=24):
-    """Procesa datos y genera estadísticas para el informe"""
+    """Procesa datos y genera estadísticas para el informe - VERSIÓN MEJORADA"""
     data = get_vital_signs_for_report(hours)
     if not data or not data["spo2_list"]:
         return None
@@ -283,11 +491,19 @@ def process_data_for_analysis(hours=24):
     hr = np.array(data["hr_list"])
 
     clinical, artifacts = classify_spo2_episodes(data["spo2_list"], data["hr_list"])
+    
+    # Obtener períodos de 8 horas
+    periods_8h = get_8hour_periods(hours)
+    
+    # Calcular tendencias
+    trend_spo2 = calculate_trend(data["spo2_list"])
+    trend_hr = calculate_trend(data["hr_list"])
 
-    return {
+    summary = {
         "timestamp_start": data["timestamp_start"],
         "timestamp_end": data["timestamp_end"],
         "total_samples": data["total_samples"],
+        # SpO2
         "spo2_avg": round(float(np.mean(spo2)), 1),
         "spo2_min": int(np.min(spo2)),
         "spo2_max": int(np.max(spo2)),
@@ -297,14 +513,25 @@ def process_data_for_analysis(hours=24):
         "spo2_below_92": int(np.sum(spo2 < 92)),
         "spo2_clinical_events": clinical,
         "spo2_artifact_events": artifacts,
+        "spo2_trend": trend_spo2,
+        # HR
         "hr_avg": round(float(np.mean(hr)), 1),
         "hr_min": int(np.min(hr)),
         "hr_max": int(np.max(hr)),
         "hr_std": round(float(np.std(hr)), 2),
         "hr_bradycardia": int(np.sum(hr < 60)),
         "hr_tachycardia": int(np.sum(hr > 100)),
-        "last_50_readings": data.get("last_50_readings", [])
+        "hr_trend": trend_hr,
+        # Períodos de 8 horas
+        "periods_8h": periods_8h,
+        # Últimos registros (reducido a 10)
+        "last_10_readings": data.get("last_50_readings", [])[-10:]
     }
+    
+    # Calcular nivel de riesgo
+    summary["risk"] = assess_risk_level(summary)
+    
+    return summary
 
 def get_statistics(hours=24):
     """Estadísticas básicas"""
@@ -324,98 +551,193 @@ def get_statistics(hours=24):
     finally: release_db_connection(conn)
 
 # ============================================================
-# LLM PROMPT FOR MEDICAL REPORT
+# LLM PROMPT FOR MEDICAL REPORT - VERSIÓN 2.0
 # ============================================================
 
+# System prompt mejorado para la API
+SYSTEM_PROMPT_MEDICAL = """Eres un médico internista con experiencia en telemonitorización 
+de pacientes crónicos en entornos residenciales. Generas informes clínicos profesionales 
+siguiendo estándares de documentación médica.
+
+PRINCIPIOS:
+- Objetividad científica sin alarmismo innecesario
+- Diferenciación clara entre eventos clínicos reales y artefactos técnicos
+- Recomendaciones accionables y proporcionadas al nivel de riesgo
+- Lenguaje comprensible para cuidadores y familiares no médicos
+- Énfasis en tendencias temporales y evolución
+
+Devuelve siempre HTML válido y completo, sin explicaciones ni bloques de código markdown."""
+
+
 def generate_llm_prompt(summary, patient):
-    """Genera prompt profesional para el informe médico"""
+    """Genera prompt profesional para el informe médico - VERSIÓN 2.0"""
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     
-    spo2_interpretation = "dentro de rangos normales"
-    if summary['spo2_avg'] < 92:
-        spo2_interpretation = "por debajo de valores óptimos, requiere evaluación"
-    elif summary['spo2_avg'] < 95:
-        spo2_interpretation = "en rango aceptable, monitorizar"
+    # Formatear tabla de períodos de 8 horas
+    periods_table = ""
+    if summary.get('periods_8h'):
+        periods_table = "\n## ANÁLISIS POR PERÍODOS DE 8 HORAS:\n"
+        periods_table += "| Período | Fecha | Muestras | SpO2 Mín | SpO2 Máx | SpO2 Prom | FC Mín | FC Máx | FC Prom |\n"
+        periods_table += "|---------|-------|----------|----------|----------|-----------|--------|--------|--------|\n"
+        for p in summary['periods_8h']:
+            date_str = p.get('date', 'N/A')
+            periods_table += f"| {p['period_name']} | {date_str} | {p['samples']} | {p['spo2_min']}% | {p['spo2_max']}% | {p['spo2_avg']}% | {p['hr_min']} | {p['hr_max']} | {p['hr_avg']} |\n"
     
-    hr_interpretation = "dentro de rangos normales"
-    if summary['hr_avg'] < 60:
-        hr_interpretation = "tendencia bradicárdica"
-    elif summary['hr_avg'] > 100:
-        hr_interpretation = "tendencia taquicárdica"
+    # Formatear últimos 10 registros
+    last_10_table = ""
+    last_10 = summary.get('last_10_readings', [])
+    if last_10:
+        last_10_table = "\n## ÚLTIMOS 10 REGISTROS:\n"
+        last_10_table += "| # | Timestamp | SpO2 | FC |\n"
+        for i, r in enumerate(last_10, 1):
+            spo2_mark = " ⚠️" if r['spo2'] < 92 else ""
+            hr_mark = " ⚠️" if r['hr'] < 60 or r['hr'] > 100 else ""
+            last_10_table += f"| {i} | {r['timestamp']} | {r['spo2']}%{spo2_mark} | {r['hr']} bpm{hr_mark} |\n"
+    
+    # Información de riesgo
+    risk = summary.get('risk', {})
+    risk_info = f"""
+## EVALUACIÓN DE RIESGO AUTOMÁTICA:
+• Nivel: {risk.get('emoji', '⚪')} {risk.get('level', 'No calculado')}
+• Puntuación: {risk.get('score', 0)}/10
+• Acción sugerida: {risk.get('action', 'N/A')}
+• Factores: {', '.join(risk.get('reasons', ['N/A']))}
+"""
 
-    # Formatear últimos 50 valores para el prompt
-    last_50 = summary.get('last_50_readings', [])
-    last_50_table = ""
-    if last_50:
-        last_50_table = "\nÚLTIMOS 50 REGISTROS:\n"
-        last_50_table += "| # | Timestamp | SpO2 (%) | HR (bpm) |\n"
-        for i, r in enumerate(last_50, 1):
-            spo2_val = r['spo2']
-            hr_val = r['hr']
-            # Marcar valores críticos
-            spo2_mark = "⚠️" if spo2_val < 92 else ""
-            hr_mark = "⚠️" if hr_val < 60 or hr_val > 150 else ""
-            last_50_table += f"| {i} | {r['timestamp']} | {spo2_val}{spo2_mark} | {hr_val}{hr_mark} |\n"
+    # Contexto del paciente
+    patient_context = ""
+    age = patient.get('age')
+    if age:
+        try:
+            age_int = int(age)
+            if age_int >= 80:
+                patient_context = "⚠️ Paciente muy mayor (≥80 años): considerar fragilidad y comorbilidades."
+            elif age_int >= 65:
+                patient_context = "Paciente geriátrico: valorar contexto clínico global."
+        except:
+            pass
 
     return f"""Genera un informe médico profesional en HTML completo y válido.
 
-DATOS DEL PACIENTE:
+══════════════════════════════════════════════════════════════
+DATOS DEL PACIENTE
+══════════════════════════════════════════════════════════════
 • Nombre: {patient.get('name', 'No especificado')}
 • Edad: {patient.get('age', 'No especificado')} años
 • Residencia: {patient.get('residence', 'No especificado')}
 • Habitación: {patient.get('room', 'No especificado')}
+{patient_context}
 
-PERÍODO DE MONITORIZACIÓN:
+══════════════════════════════════════════════════════════════
+PERÍODO DE MONITORIZACIÓN
+══════════════════════════════════════════════════════════════
 • Inicio: {summary['timestamp_start']}
 • Fin: {summary['timestamp_end']}
-• Total de muestras: {summary['total_samples']:,}
+• Duración: {summary['total_samples']:,} muestras (~{max(1, summary['total_samples']//60)} minutos)
+• Dispositivo: Pulsioxímetro HUMANS (precisión ±2% SpO2, ±3 bpm)
 
-SATURACIÓN DE OXÍGENO (SpO2):
-• Media: {summary['spo2_avg']}% (Interpretación: {spo2_interpretation})
+══════════════════════════════════════════════════════════════
+SATURACIÓN DE OXÍGENO (SpO2)
+══════════════════════════════════════════════════════════════
+• Media: {summary['spo2_avg']}%
 • Mínima: {summary['spo2_min']}% | Máxima: {summary['spo2_max']}%
 • Percentil 5: {summary['spo2_p5']}%
 • Desviación estándar: {summary['spo2_std']}%
-• Muestras < 90%: {summary['spo2_below_90']} ({round(100*summary['spo2_below_90']/max(summary['total_samples'],1), 2)}%)
-• Muestras < 92%: {summary['spo2_below_92']} ({round(100*summary['spo2_below_92']/max(summary['total_samples'],1), 2)}%)
+• Tendencia: {summary.get('spo2_trend', 'N/A')}
+• Muestras < 90%: {summary['spo2_below_90']} ({100*summary['spo2_below_90']/max(summary['total_samples'],1):.2f}%)
+• Muestras < 92%: {summary['spo2_below_92']} ({100*summary['spo2_below_92']/max(summary['total_samples'],1):.2f}%)
 
-FRECUENCIA CARDÍACA (FC):
-• Media: {summary['hr_avg']} bpm (Interpretación: {hr_interpretation})
+══════════════════════════════════════════════════════════════
+FRECUENCIA CARDÍACA (FC)
+══════════════════════════════════════════════════════════════
+• Media: {summary['hr_avg']} bpm
 • Mínima: {summary['hr_min']} bpm | Máxima: {summary['hr_max']} bpm
 • Desviación estándar: {summary['hr_std']} bpm
-• Episodios bradicardia (<60 bpm): {summary['hr_bradycardia']}
-• Episodios taquicardia (>100 bpm): {summary['hr_tachycardia']}
+• Tendencia: {summary.get('hr_trend', 'N/A')}
+• Bradicardia (<60 bpm): {summary['hr_bradycardia']} muestras
+• Taquicardia (>100 bpm): {summary['hr_tachycardia']} muestras
 
-ANÁLISIS CLÍNICO DE EVENTOS:
+══════════════════════════════════════════════════════════════
+ANÁLISIS CLÍNICO DE EVENTOS
+══════════════════════════════════════════════════════════════
 • Eventos clínicos de hipoxemia sostenida: {summary['spo2_clinical_events']}
 • Artefactos de señal (descensos transitorios): {summary['spo2_artifact_events']}
 
-NOTA: Los {summary['spo2_artifact_events']} artefactos son descensos breves por movimiento del sensor. NO representan hipoxemia clínica.
-{last_50_table}
-ESTRUCTURA DEL INFORME HTML:
-1. Encabezado con título "Informe de Monitorización Vital Continua" y datos del paciente
-2. Sección "Resumen Ejecutivo" - máximo 3-4 líneas, profesional y objetivo
-3. Tabla con parámetros vitales principales (estadísticas SpO2 y FC)
-4. Sección "Análisis de Eventos" explicando eventos clínicos vs artefactos
-5. Sección "Interpretación Clínica" con valoración médica
-6. **TABLA DE ÚLTIMOS 50 REGISTROS** - tabla con columnas: #, Timestamp, SpO2 (%), HR (bpm)
-   - Resaltar en ROJO los valores críticos (SpO2 < 92% o HR < 60 o HR > 150)
-   - Resaltar en VERDE los valores normales
-   - Usar fuente monoespaciada para los números
-7. Sección "Conclusiones y Recomendaciones"
-8. Pie de página:
-   - Aviso: "Este informe es orientativo y no sustituye el juicio clínico profesional"
-   - Fecha: {now_utc}
-   - Sistema: {SYSTEM_NAME} v{ALGORITHM_VERSION}
+NOTA: Los artefactos son descensos breves (<30s) por movimiento del sensor, 
+SIN correlación con cambios en frecuencia cardíaca. NO representan hipoxemia clínica.
+{risk_info}
+{periods_table}
+{last_10_table}
+══════════════════════════════════════════════════════════════
+ESTRUCTURA DEL INFORME HTML
+══════════════════════════════════════════════════════════════
 
-ESTILOS CSS:
-- Fuente: Arial, sans-serif
-- Colores: azul (#1a5276) encabezados, gris (#5d6d7e) texto
-- Tablas con bordes suaves y zebra striping (filas alternas)
-- Valores críticos en rojo (#c0392b), normales en verde (#27ae60)
-- Tabla de registros: fuente pequeña (11px), compacta
-- Diseño limpio para impresión A4
+Genera el informe con estas secciones EN ESTE ORDEN:
 
-Devuelve SOLO HTML válido completo. Sin explicaciones."""
+1. **ENCABEZADO**
+   - Título: "Informe de Monitorización Vital Continua"
+   - Subtítulo con nombre del paciente
+   - Badge/etiqueta con nivel de riesgo (color según nivel)
+
+2. **DATOS DEL PACIENTE** (tabla compacta)
+   - Nombre, Edad, Residencia, Habitación
+   - Período de monitorización
+
+3. **RESUMEN EJECUTIVO** (máximo 4 líneas)
+   - Estado general
+   - Nivel de riesgo con emoji
+   - Hallazgo más relevante
+   - Acción recomendada
+
+4. **TABLA DE PARÁMETROS VITALES GLOBALES**
+   | Parámetro | Media | Mín | Máx | Tendencia | Estado |
+   - SpO2 y FC con sus valores
+   - Colorear según normalidad
+
+5. **TABLA DE ANÁLISIS POR PERÍODOS DE 8 HORAS** ⭐ MUY IMPORTANTE
+   - Mostrar cada período con: nombre, fecha, muestras, SpO2 (mín/máx/prom), FC (mín/máx/prom)
+   - Resaltar períodos con valores alterados en amarillo/rojo
+   - Esta tabla muestra la evolución temporal del paciente
+
+6. **ANÁLISIS DE EVENTOS**
+   - Diferenciar eventos clínicos vs artefactos
+   - Explicar en lenguaje comprensible
+
+7. **INTERPRETACIÓN CLÍNICA**
+   - Valoración médica objetiva
+   - Correlación SpO2-FC
+   - Análisis de tendencias
+
+8. **TABLA DE ÚLTIMOS 10 REGISTROS**
+   - Solo 10 registros (no 50)
+   - Resaltar valores críticos en rojo
+
+9. **RECOMENDACIONES** (según nivel de riesgo)
+   - 🟢 BAJO: Continuar monitorización
+   - 🟡 MODERADO: Vigilancia estrecha
+   - 🟠 ALTO: Evaluación médica en 24h
+   - 🔴 CRÍTICO: Atención urgente
+
+10. **PIE DE PÁGINA**
+    - Disclaimer legal
+    - Fecha: {now_utc}
+    - Sistema: {SYSTEM_NAME} v{ALGORITHM_VERSION}
+
+══════════════════════════════════════════════════════════════
+ESTILOS CSS
+══════════════════════════════════════════════════════════════
+- Fuente: Arial, Helvetica, sans-serif
+- Encabezados: #1a5276 (azul oscuro)
+- Riesgo BAJO: #27ae60 (verde)
+- Riesgo MODERADO: #f39c12 (amarillo/naranja)
+- Riesgo ALTO: #e67e22 (naranja)
+- Riesgo CRÍTICO: #c0392b (rojo)
+- Tablas: bordes #ddd, zebra striping, padding 8px
+- Badges de riesgo: bordes redondeados, padding 5px 15px
+- Optimizado para impresión A4
+- Fuente pequeña (11px) para tablas de datos
+
+Devuelve SOLO HTML válido y completo. Sin explicaciones ni markdown."""
 
 # ============================================================
 # EMAIL FUNCTIONS
@@ -552,11 +874,11 @@ def api_report_pdf():
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": "Eres un médico especialista que genera informes clínicos profesionales en HTML. Devuelve siempre HTML válido y completo, sin explicaciones."},
+                {"role": "system", "content": SYSTEM_PROMPT_MEDICAL},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
-            max_tokens=4500
+            max_tokens=5500
         )
         
         html_content = response.choices[0].message.content.strip()
