@@ -39,10 +39,6 @@ from weasyprint import HTML
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from flask import session, redirect, url_for  # Añadir a imports existentes
-from datetime import timedelta  # Añadir si no existe
-from auth import init_auth_routes, login_required, get_current_user
-
 load_dotenv(".env")
 client = OpenAI()
 LLM_MODEL = "gpt-4o-mini"
@@ -76,7 +72,6 @@ last_hr_critical = False
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'humans-2024')
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -839,27 +834,11 @@ def send_alert_async(alert_type, spo2, hr):
     eventlet.spawn(lambda: send_alert_email(alert_type, spo2, hr))
 
 # ============================================================
-# AUTENTICACIÓN
-# ============================================================
-init_auth_routes(app)
-
-# ============================================================
 # ROUTES
 # ============================================================
 
 @app.route("/")
-def home():
-    """Redirige al login o dashboard según estado de sesión."""
-    if 'user' in session:
-        return redirect(url_for('dashboard'))
-    return redirect(url_for('login_page'))
-
-@app.route("/dashboard")
-@login_required
-def dashboard():
-    """Dashboard principal - requiere autenticación."""
-    user = get_current_user()
-    return render_template("index11.html")
+def index(): return render_template("index11.html")
 
 @app.route("/api/data", methods=["POST"])
 def receive_data():

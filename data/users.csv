@@ -1,0 +1,7 @@
+username,password,role,name
+admin,admin123,admin,Administrador Sistema
+medico1,med2024,medico,Dr. García Martínez
+medico2,doc456,medico,Dra. López Fernández
+enfermero1,enf789,enfermero,Juan Pérez
+enfermero2,enf321,enfermero,María Sánchez
+supervisor,super2024,supervisor,Carlos Ruiz

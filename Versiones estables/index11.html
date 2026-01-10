@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>HumanS – Monitor Vital (AI Report + Alertas Email)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    body { font-family: "Segoe UI", sans-serif; background:#eef2f7; margin:0; padding:0; }
+    .container { max-width:900px; margin:24px auto; padding:20px; background:#eaf6ff; border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,0.08); }
+    h1 { text-align:center; color:#123e66; margin:0 0 8px; }
+    h2 { text-align:center; color:#123e66; margin:24px 0 12px; font-size:1.4em; }
+
+    .status { display:inline-block; text-align:center; margin:10px auto; padding:6px 14px; border-radius:8px; font-weight:700; }
+    .connected { background:white; color:#155724; border: 2px solid #155724; }
+    .disconnected { background:white; color:#c92a2a; border:2px solid #c92a2a; }
+
+    .top-row { display:flex; gap:20px; align-items:center; justify-content:center; margin-top:12px; }
+    .big { text-align:center; min-width:160px; }
+    .label { font-weight:600; color:#34495e; margin-bottom:6px; }
+    .value { font-family:"Courier New", monospace; font-size:84px; font-weight:800; }
+    .value.good { color:#27ae60; }
+    .value.warn { color:#e74c3c; }
+
+    .patient-box { margin:14px auto; background: rgba(255,255,255,0.8); padding:12px; border-radius:8px; text-align:left; width:92%; box-shadow:0 6px 18px rgba(0,0,0,0.04); }
+    .patient-box input { padding: 5px 8px; margin: 0 4px; border: 1px solid #ccc; border-radius: 4px; font-size: 14px; }
+    .patient-box input.email-input { width: 220px; }
+    .patient-box label { font-weight: 600; color: #34495e; margin-right: 6px; }
+    
+    /* GRÁFICO MÁS GRANDE */
+    .chart-container { 
+      width: 100%; 
+      height: 500px; 
+      margin: 20px 0;
+    }
+    #dualChart { 
+      width: 100% !important; 
+      height: 100% !important;
+    }
+
+    .controls { text-align:center; margin-top:12px; }
+    .btn { padding:8px 14px; border-radius:8px; border:none; cursor:pointer; background:#1c70d6; color:white; font-weight:700; margin:6px 6px; }
+    .btn.secondary { background:#6c757d; }
+    .btn.predict { background:#28a745; }
+    .btn.email-btn { background:#dc3545; }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .alerting { box-shadow:0 0 0 8px rgba(231,76,60,0.10); border-radius:12px; animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(231,76,60,0);} 50% { box-shadow:0 0 0 12px rgba(231,76,60,0.12);} }
+
+    #loadingBox { margin-top:18px; padding:14px; background:white; border-radius:10px; display:none; text-align:center; }
+    .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #1c70d6; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+    .alert-config-section { margin-top:20px; padding:16px; background: linear-gradient(135deg, #fff5f5 0%, #ffe8e8 100%); border-radius:10px; border-left: 4px solid #dc3545; }
+    .alert-config-section h2 { margin: 0 0 12px 0; color: #dc3545; text-align: left; font-size: 1.2em; }
+    .alert-config-grid { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: center; }
+    .email-status { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+    .email-status.active { background: #d4edda; color: #155724; }
+    .email-status.inactive { background: #f8d7da; color: #721c24; }
+    .threshold-info { margin-top: 12px; padding: 10px; background: rgba(255,255,255,0.7); border-radius: 6px; font-size: 0.85em; color: #495057; }
+    .threshold-info strong { color: #dc3545; }
+
+    .diagnostics-section { margin-top:24px; padding:16px; background:rgba(255,255,255,0.9); border-radius:10px; }
+    .diagnostics-grid { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-top:12px; }
+    .diag-card { padding:10px; background:#f8f9fa; border-radius:6px; border-left:4px solid #1c70d6; }
+    .diag-card .diag-label { font-size:0.85em; color:#6c757d; font-weight:600; margin-bottom:4px; }
+    .diag-card .diag-value { font-size:1.8em; font-weight:700; color:#123e66; font-family:"Courier New", monospace; }
+
+    .toast { position: fixed; bottom: 20px; right: 20px; padding: 16px 24px; background: #28a745; color: white; border-radius: 8px; transform: translateY(100px); opacity: 0; transition: all 0.3s; z-index: 1000; font-weight: 600; }
+    .toast.show { transform: translateY(0); opacity: 1; }
+    .toast.error { background: #dc3545; }
+
+    @media (max-width:768px) {
+      .value { font-size:56px; }
+      .chart-container { height: 350px; }
+      .diagnostics-grid { grid-template-columns: 1fr; }
+      .alert-config-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container" id="mainCard">
+    <h1>HUMANS – Monitor Vital (AI Report)</h1>
+    <div id="status" class="status disconnected">Conectando...</div>
+
+    <div class="patient-box">
+      <div>
+        <label>Paciente:</label>
+        <input type="text" id="patientName" value="Paciente01">
+        &nbsp;&nbsp;
+        <label>Edad:</label>
+        <input type="number" id="patientAge" value="81" style="width: 60px;"> años
+      </div>
+      <div style="margin-top: 8px;">
+        <label>Residencia:</label>
+        <input type="text" id="patientResidence" value="Residencia Albareda">
+        &nbsp;&nbsp;
+        <label>Habitación:</label>
+        <input type="text" id="patientRoom" value="101" style="width: 80px;">
+      </div>
+    </div>
+
+    <div class="top-row">
+      <div class="big">
+        <div class="label">SpO₂ (%)</div>
+        <div id="spo2" class="value">--</div>
+      </div>
+      <div class="big">
+        <div class="label">HR (bpm)</div>
+        <div id="hr" class="value">--</div>
+      </div>
+    </div>
+
+    <!-- GRÁFICO MÁS GRANDE -->
+    <div class="chart-container">
+      <canvas id="dualChart"></canvas>
+    </div>
+
+    <div class="controls">
+      <button id="pauseBtn" class="btn secondary">Pausar</button>
+      <button id="clearBtn" class="btn">Borrar historial</button>
+      <button id="reportBtn" class="btn predict">Informe médico (PDF)</button>
+    </div>
+
+    <div id="loadingBox">
+      <div class="spinner"></div>
+      <p>Generando informe médico con IA...</p>
+    </div>
+
+    <!-- ALERTAS EMAIL -->
+    <div class="alert-config-section">
+      <h2>📧 Configuración de Alertas por Email</h2>
+      <div class="alert-config-grid">
+        <div>
+          <label for="alertEmail">Email de notificación:</label>
+          <input type="email" id="alertEmail" class="email-input" placeholder="correo@ejemplo.com">
+        </div>
+        <div>
+          <button id="saveEmailBtn" class="btn email-btn">💾 Guardar</button>
+          <button id="testEmailBtn" class="btn secondary">📤 Probar</button>
+        </div>
+      </div>
+      <div style="margin-top: 10px;">
+        <span class="email-status inactive" id="emailStatus">❌ No configurado</span>
+        <span id="currentEmailDisplay" style="margin-left: 10px; color: #6c757d;"></span>
+      </div>
+      <div class="threshold-info">
+        <strong>⚠️ Umbrales:</strong> 
+        SpO₂ < <strong id="thresholdSpo2">92</strong>% | 
+        HR < <strong id="thresholdHrLow">60</strong> o > <strong id="thresholdHrHigh">150</strong> bpm
+      </div>
+    </div>
+
+    <!-- DIAGNÓSTICO -->
+    <div class="diagnostics-section">
+      <h2>🔧 Diagnóstico BLE</h2>
+      <div class="diagnostics-grid">
+        <div class="diag-card">
+          <div class="diag-label">Paquetes Recibidos</div>
+          <div class="diag-value" id="packetCount">0</div>
+        </div>
+        <div class="diag-card" style="border-left-color: #28a745;">
+          <div class="diag-label">Distancia (m)</div>
+          <div class="diag-value" id="distance">--</div>
+        </div>
+        <div class="diag-card" style="border-left-color: #ffc107;">
+          <div class="diag-label">RSSI (dBm)</div>
+          <div class="diag-value" id="rssi">--</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    function showToast(msg, isError=false) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast' + (isError ? ' error' : '');
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 3000);
+    }
+
+    // Socket
+    let socket = null;
+    try {
+      socket = typeof io !== 'undefined' ? io() : { on: ()=>{}, emit: ()=>{} };
+    } catch(e) {
+      socket = { on: ()=>{}, emit: ()=>{} };
+    }
+
+    // Gráfico
+    let dualChart = null;
+    try {
+      const ctx = document.getElementById('dualChart').getContext('2d');
+      dualChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: [],
+          datasets: [
+            { label: 'SpO₂', data: [], borderColor: '#0074D9', borderWidth: 2, tension: 0.2, yAxisID: 'y', pointRadius: 1 },
+            { label: 'HR', data: [], borderColor: '#FF4136', borderWidth: 2, tension: 0.2, yAxisID: 'y1', pointRadius: 1 }
+          ]
+        },
+        options: {
+          animation: false,
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { position: 'top', labels: { font: { size: 14 } } }
+          },
+          scales: {
+            y: { type: 'linear', position: 'left', min: 60, max: 100, 
+                 title: { display: true, text: 'SpO₂ %', font: { size: 14 } } },
+            y1: { type: 'linear', position: 'right', min: 30, max: 180, 
+                  grid: { drawOnChartArea: false }, 
+                  title: { display: true, text: 'HR bpm', font: { size: 14 } } }
+          }
+        }
+      });
+    } catch(e) { console.warn('Chart error:', e); }
+
+    let paused = false;
+    document.getElementById('pauseBtn').onclick = () => {
+      paused = !paused;
+      document.getElementById('pauseBtn').textContent = paused ? 'Reanudar' : 'Pausar';
+    };
+
+    document.getElementById('clearBtn').onclick = () => {
+      if (dualChart) {
+        dualChart.data.labels = [];
+        dualChart.data.datasets[0].data = [];
+        dualChart.data.datasets[1].data = [];
+        dualChart.update();
+      }
+      document.getElementById('spo2').textContent = '--';
+      document.getElementById('hr').textContent = '--';
+    };
+
+    // Audio
+    let audioCtx = null;
+    function playAlertBeep() {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const o = audioCtx.createOscillator();
+        const g = audioCtx.createGain();
+        o.type = 'sine'; o.frequency.value = 900; g.gain.value = 0.12;
+        o.connect(g); g.connect(audioCtx.destination);
+        o.start(); setTimeout(() => o.stop(), 200);
+      } catch(e) {}
+    }
+
+    const mainCard = document.getElementById('mainCard');
+    function setAlertOn(on) { on ? mainCard.classList.add('alerting') : mainCard.classList.remove('alerting'); }
+
+    // Socket events
+    socket.on('update', data => {
+      if (paused) return;
+      document.getElementById('spo2').textContent = data.spo2 ?? '--';
+      document.getElementById('hr').textContent = data.hr ?? '--';
+      document.getElementById('spo2').className = 'value ' + (data.spo2_critical ? 'warn' : 'good');
+      document.getElementById('hr').className = 'value ' + (data.hr_critical ? 'warn' : 'good');
+
+      if (dualChart && data.spo2_history && data.hr_history) {
+        dualChart.data.labels = data.spo2_history.map((_, i) => i);
+        dualChart.data.datasets[0].data = data.spo2_history;
+        dualChart.data.datasets[1].data = data.hr_history;
+        dualChart.update('none');
+      }
+
+      if (data.spo2_critical || data.hr_critical) { setAlertOn(true); playAlertBeep(); }
+      else { setAlertOn(false); }
+    });
+
+    socket.on('raw_update', data => {
+      document.getElementById('packetCount').textContent = data.count || 0;
+      const distEl = document.getElementById('distance');
+      if (data.distance != null) {
+        distEl.textContent = data.distance + 'm';
+        const card = distEl.closest('.diag-card');
+        card.style.borderLeftColor = data.distance < 1 ? '#28a745' : data.distance < 3 ? '#ffc107' : '#dc3545';
+      } else { distEl.textContent = '--'; }
+      document.getElementById('rssi').textContent = data.rssi ?? '--';
+    });
+
+    socket.on('alert_sent', data => showToast(`📧 ${data.message}`));
+    socket.on('connect', () => { document.getElementById('status').textContent = "Conectado"; document.getElementById('status').className = "status connected"; fetchEmailConfig(); });
+    socket.on('disconnect', () => { document.getElementById('status').textContent = "Desconectado"; document.getElementById('status').className = "status disconnected"; });
+
+    // Email config
+    const alertEmailInput = document.getElementById('alertEmail');
+    const emailStatus = document.getElementById('emailStatus');
+    const currentEmailDisplay = document.getElementById('currentEmailDisplay');
+
+    function updateEmailStatus(email) {
+      if (email && email.includes('@')) {
+        emailStatus.className = 'email-status active';
+        emailStatus.textContent = '✅ Configurado';
+        currentEmailDisplay.textContent = `→ ${email}`;
+      } else {
+        emailStatus.className = 'email-status inactive';
+        emailStatus.textContent = '❌ No configurado';
+        currentEmailDisplay.textContent = '';
+      }
+    }
+
+    async function fetchEmailConfig() {
+      try {
+        const r = await fetch('/api/email/config');
+        if (r.ok) {
+          const data = await r.json();
+          if (data.email_to) { alertEmailInput.value = data.email_to; updateEmailStatus(data.email_to); }
+          if (data.thresholds) {
+            document.getElementById('thresholdSpo2').textContent = data.thresholds.spo2_critical || 92;
+            document.getElementById('thresholdHrLow').textContent = data.thresholds.hr_low || 60;
+            document.getElementById('thresholdHrHigh').textContent = data.thresholds.hr_high || 150;
+          }
+        }
+      } catch(e) {}
+    }
+
+    document.getElementById('saveEmailBtn').addEventListener('click', async () => {
+      const email = alertEmailInput.value.trim();
+      if (!email || !email.includes('@')) { showToast('Email inválido', true); return; }
+      const btn = document.getElementById('saveEmailBtn');
+      btn.disabled = true; btn.textContent = '⏳';
+      try {
+        const r = await fetch('/api/email/config', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ email_to: email, patient_name: document.getElementById('patientName').value,
+                                patient_room: document.getElementById('patientRoom').value,
+                                patient_residence: document.getElementById('patientResidence').value })
+        });
+        if (r.ok) { updateEmailStatus(email); showToast('✅ Email guardado'); }
+        else { const e = await r.json(); showToast(e.error || 'Error', true); }
+      } catch(e) { showToast('Error de conexión', true); }
+      finally { btn.disabled = false; btn.textContent = '💾 Guardar'; }
+    });
+
+    document.getElementById('testEmailBtn').addEventListener('click', async () => {
+      const email = alertEmailInput.value.trim();
+      if (!email) { showToast('Configura un email primero', true); return; }
+      const btn = document.getElementById('testEmailBtn');
+      btn.disabled = true; btn.textContent = '⏳';
+      try {
+        const r = await fetch('/api/email/test', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ email_to: email, patient_name: document.getElementById('patientName').value })
+        });
+        const data = await r.json();
+        if (r.ok) { showToast(data.message || '✅ Email enviado'); }
+        else { showToast(data.error || 'Error', true); }
+      } catch(e) { showToast('Error de conexión', true); }
+      finally { btn.disabled = false; btn.textContent = '📤 Probar'; }
+    });
+
+    // PDF Report
+    document.getElementById('reportBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('reportBtn');
+      const loadingBox = document.getElementById('loadingBox');
+      btn.disabled = true; loadingBox.style.display = 'block';
+      try {
+        const r = await fetch('/api/report/pdf', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            name: document.getElementById('patientName').value,
+            age: document.getElementById('patientAge').value,
+            residence: document.getElementById('patientResidence').value,
+            room: document.getElementById('patientRoom').value
+          })
+        });
+        if (r.ok) {
+          const blob = await r.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url; a.download = `informe_${new Date().toISOString().slice(0,10)}.pdf`;
+          a.click(); window.URL.revokeObjectURL(url);
+          showToast('✅ Informe descargado');
+        } else { showToast('Error al generar informe', true); }
+      } catch(e) { showToast('Error de conexión', true); }
+      finally { btn.disabled = false; loadingBox.style.display = 'none'; }
+    });
+
+    // Init
+    fetchEmailConfig();
+  </script>
+</body>
+</html>

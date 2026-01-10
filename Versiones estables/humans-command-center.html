@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HUMANS — Medical Command Center</title>
+  
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-primary: #ffffff;
+      --bg-secondary: #f8fafc;
+      --bg-card: #ffffff;
+      --bg-elevated: #f1f5f9;
+      --border-color: #e2e8f0;
+      --border-active: #0ea5e9;
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --text-muted: #94a3b8;
+      --accent-cyan: #0ea5e9;
+      --accent-cyan-dim: rgba(14, 165, 233, 0.1);
+      --accent-green: #10b981;
+      --accent-green-dim: rgba(16, 185, 129, 0.1);
+      --accent-red: #ef4444;
+      --accent-red-dim: rgba(239, 68, 68, 0.1);
+      --accent-orange: #f59e0b;
+      --accent-orange-dim: rgba(245, 158, 11, 0.1);
+      --accent-purple: #8b5cf6;
+      --gradient-critical: linear-gradient(135deg, rgba(239, 68, 68, 0.08) 0%, rgba(239, 68, 68, 0.03) 100%);
+      --gradient-warning: linear-gradient(135deg, rgba(245, 158, 11, 0.08) 0%, rgba(245, 158, 11, 0.03) 100%);
+      --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+      --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 16px;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Outfit', sans-serif; background: var(--bg-secondary); color: var(--text-primary); min-height: 100vh; }
+    
+    .app-container { display: grid; grid-template-columns: 1fr 400px; grid-template-rows: auto 1fr; min-height: 100vh; }
+    
+    .header {
+      grid-column: 1 / -1;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 12px 24px;
+      background: var(--bg-card);
+      border-bottom: 1px solid var(--border-color);
+      box-shadow: var(--shadow-sm);
+    }
+    .logo { display: flex; align-items: center; gap: 12px; }
+    .logo-icon { width: 150px; height: 45px; background: #1a2744; border-radius: var(--radius-sm); overflow: hidden; display: flex; align-items: center; justify-content: center; }
+    .logo-icon img { width: 100%; height: 100%; object-fit: contain; padding: 6px; }
+    .logo-subtitle { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; }
+    
+    .header-stats { display: flex; gap: 24px; }
+    .header-stat { text-align: center; }
+    .header-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 24px; font-weight: 700; }
+    .header-stat-value.critical { color: var(--accent-red); }
+    .header-stat-value.warning { color: var(--accent-orange); }
+    .header-stat-value.stable { color: var(--accent-green); }
+    .header-stat-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; }
+    
+    .header-actions { display: flex; gap: 12px; align-items: center; }
+    .status-badge { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--bg-elevated); border: 1px solid var(--border-color); border-radius: 20px; font-size: 13px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent-red); }
+    .status-dot.connected { background: var(--accent-green); animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .time-display { font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--text-secondary); }
+    
+    .main-content { padding: 20px; overflow-y: auto; max-height: calc(100vh - 70px); }
+    .section-title { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .section-title h2 { font-size: 18px; font-weight: 700; }
+    .section-title .badge { padding: 4px 10px; background: var(--accent-cyan-dim); color: var(--accent-cyan); border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; }
+    
+    .patients-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; }
+    
+    .patient-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.2s;
+      position: relative;
+      box-shadow: var(--shadow-sm);
+    }
+    .patient-card::before { content: ''; position: absolute; top: 0; left: 0; width: 4px; height: 100%; background: var(--accent-green); border-radius: var(--radius-lg) 0 0 var(--radius-lg); }
+    .patient-card.warning::before { background: var(--accent-orange); }
+    .patient-card.critical::before { background: var(--accent-red); }
+    .patient-card.offline::before { background: var(--text-muted); }
+    .patient-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+    .patient-card.critical { background: var(--gradient-critical); animation: alertPulse 2s infinite; }
+    .patient-card.warning { background: var(--gradient-warning); }
+    .patient-card.offline { opacity: 0.6; }
+    @keyframes alertPulse { 0%, 100% { box-shadow: var(--shadow-sm); } 50% { box-shadow: 0 0 15px rgba(239,68,68,0.3); } }
+    
+    .patient-header { display: flex; justify-content: space-between; margin-bottom: 12px; }
+    .patient-info h3 { font-size: 15px; font-weight: 600; margin-bottom: 2px; }
+    .patient-meta { font-size: 12px; color: var(--text-muted); }
+    .patient-status { padding: 4px 8px; border-radius: var(--radius-sm); font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .patient-status.stable { background: var(--accent-green-dim); color: var(--accent-green); }
+    .patient-status.warning { background: var(--accent-orange-dim); color: var(--accent-orange); }
+    .patient-status.critical { background: var(--accent-red-dim); color: var(--accent-red); }
+    .patient-status.offline { background: var(--bg-elevated); color: var(--text-muted); }
+    
+    .patient-vitals { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .vital-box { background: var(--bg-elevated); border-radius: var(--radius-md); padding: 10px; text-align: center; }
+    .vital-label { font-size: 10px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 2px; }
+    .vital-value { font-family: 'JetBrains Mono', monospace; font-size: 32px; font-weight: 700; line-height: 1; }
+    .vital-value.good { color: var(--accent-green); }
+    .vital-value.warn { color: var(--accent-red); }
+    .vital-value.offline { color: var(--text-muted); }
+    .vital-unit { font-size: 11px; color: var(--text-muted); }
+    
+    .patient-chart { height: 50px; }
+    .patient-chart canvas { width: 100% !important; height: 100% !important; }
+    
+    .patient-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color); }
+    .ble-indicator { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
+    .ble-signal { display: flex; gap: 2px; align-items: flex-end; }
+    .ble-bar { width: 3px; background: var(--text-muted); border-radius: 1px; opacity: 0.3; }
+    .ble-bar:nth-child(1) { height: 5px; }
+    .ble-bar:nth-child(2) { height: 8px; }
+    .ble-bar:nth-child(3) { height: 11px; }
+    .ble-bar:nth-child(4) { height: 14px; }
+    .ble-signal.strong .ble-bar { background: var(--accent-green); opacity: 1; }
+    
+    .action-btn { width: 28px; height: 28px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-card); color: var(--text-secondary); cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 12px; }
+    .action-btn:hover { background: var(--accent-cyan-dim); color: var(--accent-cyan); }
+    .action-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    
+    .sidebar { background: var(--bg-card); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; max-height: calc(100vh - 70px); overflow: hidden; }
+    .sidebar-header { padding: 16px; border-bottom: 1px solid var(--border-color); background: var(--bg-elevated); }
+    .sidebar-header h3 { font-size: 15px; font-weight: 700; }
+    .sidebar-content { flex: 1; overflow-y: auto; padding: 16px; }
+    
+    .service-section { margin-bottom: 20px; background: var(--bg-secondary); border-radius: var(--radius-md); border: 1px solid var(--border-color); overflow: hidden; }
+    .service-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; background: var(--bg-card); border-bottom: 1px solid var(--border-color); }
+    .service-title { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
+    .service-icon { width: 28px; height: 28px; background: var(--accent-cyan-dim); border-radius: var(--radius-sm); display: flex; align-items: center; justify-content: center; font-size: 14px; }
+    .service-icon.email { background: var(--accent-red-dim); }
+    .service-icon.ai { background: linear-gradient(135deg, var(--accent-purple), var(--accent-cyan)); }
+    .service-status { padding: 3px 8px; border-radius: 12px; font-size: 10px; font-weight: 600; }
+    .service-status.active { background: var(--accent-green-dim); color: var(--accent-green); }
+    .service-status.inactive { background: var(--accent-red-dim); color: var(--accent-red); }
+    .service-body { padding: 16px; }
+    
+    .form-group { margin-bottom: 14px; }
+    .form-label { display: block; font-size: 11px; font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; text-transform: uppercase; }
+    .form-input { width: 100%; padding: 10px 12px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); color: var(--text-primary); font-family: 'Outfit', sans-serif; font-size: 14px; }
+    .form-input:focus { outline: none; border-color: var(--accent-cyan); box-shadow: 0 0 0 3px var(--accent-cyan-dim); }
+    .form-help { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    
+    .threshold-box { display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); }
+    .threshold-box label { font-size: 11px; color: var(--text-secondary); }
+    .threshold-input { width: 50px; padding: 4px 6px; background: var(--bg-elevated); border: 1px solid var(--border-color); border-radius: var(--radius-sm); text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 13px; font-weight: 600; }
+    
+    .btn { padding: 10px 16px; border: none; border-radius: var(--radius-sm); font-family: 'Outfit', sans-serif; font-size: 13px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; transition: all 0.2s; }
+    .btn-primary { background: var(--accent-cyan); color: white; }
+    .btn-primary:hover { background: #0284c7; }
+    .btn-secondary { background: var(--bg-elevated); color: var(--text-primary); border: 1px solid var(--border-color); }
+    .btn-success { background: var(--accent-green); color: white; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-group { display: flex; gap: 8px; margin-top: 12px; }
+    .btn-group .btn { flex: 1; }
+    
+    .diagnostics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+    .diag-card { padding: 10px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); text-align: center; }
+    .diag-label { font-size: 9px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 2px; }
+    .diag-value { font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700; }
+    
+    .alerts-section { margin-top: 20px; }
+    .alerts-header { margin-bottom: 10px; }
+    .alerts-header h4 { font-size: 13px; font-weight: 600; }
+    .alerts-list { display: flex; flex-direction: column; gap: 8px; }
+    .alert-item { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-sm); padding: 10px 12px; border-left: 3px solid var(--accent-orange); }
+    .alert-item.critical { border-left-color: var(--accent-red); background: var(--accent-red-dim); }
+    .alert-item.info { border-left-color: var(--accent-cyan); }
+    .alert-header { display: flex; justify-content: space-between; margin-bottom: 4px; }
+    .alert-type { font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .alert-type.critical { color: var(--accent-red); }
+    .alert-type.warning { color: var(--accent-orange); }
+    .alert-type.info { color: var(--accent-cyan); }
+    .alert-time { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+    .alert-message { font-size: 12px; color: var(--text-primary); }
+    .alert-patient { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+    
+    .loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.95); display: none; align-items: center; justify-content: center; z-index: 1000; flex-direction: column; gap: 16px; }
+    .loading-overlay.show { display: flex; }
+    .loading-spinner { width: 40px; height: 40px; border: 3px solid var(--border-color); border-top-color: var(--accent-cyan); border-radius: 50%; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-text { font-size: 14px; font-weight: 600; }
+    
+    .toast-container { position: fixed; bottom: 20px; right: 20px; z-index: 1001; display: flex; flex-direction: column; gap: 8px; }
+    .toast { padding: 12px 16px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); font-size: 13px; box-shadow: var(--shadow-lg); transform: translateX(120%); transition: transform 0.3s; }
+    .toast.show { transform: translateX(0); }
+    .toast.success { border-left: 3px solid var(--accent-green); }
+    .toast.error { border-left: 3px solid var(--accent-red); }
+    .toast.info { border-left: 3px solid var(--accent-cyan); }
+    
+    .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,23,42,0.5); display: none; align-items: center; justify-content: center; z-index: 1000; padding: 20px; }
+    .modal-overlay.show { display: flex; }
+    .modal { background: var(--bg-card); border-radius: var(--radius-lg); width: 100%; max-width: 600px; max-height: 90vh; overflow: hidden; box-shadow: var(--shadow-lg); }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--border-color); }
+    .modal-title { font-size: 16px; font-weight: 600; }
+    .modal-close { width: 28px; height: 28px; border: 1px solid var(--border-color); border-radius: var(--radius-sm); background: var(--bg-card); cursor: pointer; font-size: 16px; }
+    .modal-body { padding: 20px; overflow-y: auto; max-height: calc(90vh - 60px); }
+    .modal-patient-header { display: flex; gap: 16px; margin-bottom: 20px; }
+    .modal-patient-avatar { width: 60px; height: 60px; background: linear-gradient(135deg, var(--accent-cyan-dim), var(--accent-purple)); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; font-size: 24px; }
+    .modal-patient-info h2 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+    .modal-patient-meta { display: flex; gap: 12px; color: var(--text-secondary); font-size: 13px; }
+    .modal-vitals { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+    .modal-vital-card { background: var(--bg-elevated); border-radius: var(--radius-md); padding: 16px; text-align: center; }
+    .modal-vital-value { font-family: 'JetBrains Mono', monospace; font-size: 40px; font-weight: 700; }
+    .modal-vital-label { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+    .modal-chart { height: 150px; background: var(--bg-elevated); border-radius: var(--radius-md); padding: 12px; }
+    
+    @media (max-width: 1100px) {
+      .app-container { grid-template-columns: 1fr; }
+      .sidebar { max-height: none; border-left: none; border-top: 1px solid var(--border-color); }
+      .main-content { max-height: none; }
+      .header-stats { display: none; }
+    }
+    @media (max-width: 600px) {
+      .header { padding: 10px 16px; }
+      .logo-icon { width: 120px; height: 36px; }
+      .main-content { padding: 12px; }
+      .patients-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">
+          <img src="Logo_azul.png" alt="HUMANS">
+        </div>
+        <div class="logo-subtitle">Medical Command Center</div>
+      </div>
+      <div class="header-stats">
+        <div class="header-stat">
+          <div class="header-stat-value critical" id="statCritical">0</div>
+          <div class="header-stat-label">Críticos</div>
+        </div>
+        <div class="header-stat">
+          <div class="header-stat-value warning" id="statWarning">0</div>
+          <div class="header-stat-label">Alerta</div>
+        </div>
+        <div class="header-stat">
+          <div class="header-stat-value stable" id="statStable">1</div>
+          <div class="header-stat-label">Estables</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="status-badge">
+          <div class="status-dot" id="connectionDot"></div>
+          <span id="connectionStatus">Conectando...</span>
+        </div>
+        <div class="time-display" id="currentTime">--:--:--</div>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <div class="section-title">
+        <h2>👥 Pacientes Monitorizados</h2>
+        <span class="badge">6 pacientes</span>
+      </div>
+      <div class="patients-grid" id="patientsGrid"></div>
+    </main>
+
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h3>⚙️ Panel de Servicios</h3>
+      </div>
+      <div class="sidebar-content">
+        <!-- EMAIL SERVICE -->
+        <div class="service-section">
+          <div class="service-header">
+            <div class="service-title">
+              <div class="service-icon email">📧</div>
+              <span>Alertas por Email</span>
+            </div>
+            <span class="service-status inactive" id="emailServiceStatus">No config.</span>
+          </div>
+          <div class="service-body">
+            <div class="form-group">
+              <label class="form-label">Email de notificación</label>
+              <input type="email" class="form-input" id="alertEmail" placeholder="medico@hospital.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Centro / Residencia</label>
+              <input type="text" class="form-input" id="centerName" value="Residencia Albareda">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Umbrales de alerta</label>
+              <div class="form-row">
+                <div class="threshold-box">
+                  <label>SpO₂ &lt;</label>
+                  <input type="number" class="threshold-input" id="thresholdSpo2" value="92">
+                  <span>%</span>
+                </div>
+                <div class="threshold-box">
+                  <label>FC &gt;</label>
+                  <input type="number" class="threshold-input" id="thresholdHrHigh" value="150">
+                </div>
+              </div>
+              <div class="threshold-box" style="margin-top:8px; width:fit-content;">
+                <label>FC &lt;</label>
+                <input type="number" class="threshold-input" id="thresholdHrLow" value="60">
+                <span>bpm</span>
+              </div>
+            </div>
+            <div class="btn-group">
+              <button class="btn btn-primary" id="saveEmailBtn">💾 Guardar</button>
+              <button class="btn btn-secondary" id="testEmailBtn">📤 Probar</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- AI REPORTS -->
+        <div class="service-section">
+          <div class="service-header">
+            <div class="service-title">
+              <div class="service-icon ai">✨</div>
+              <span>Informes con IA</span>
+            </div>
+            <span class="service-status active">Activo</span>
+          </div>
+          <div class="service-body">
+            <button class="btn btn-success" style="width:100%" id="generateReportBtn">📄 Generar Informe PDF</button>
+            <div class="form-help" style="margin-top:8px; text-align:center;">Genera un informe del paciente conectado</div>
+          </div>
+        </div>
+
+        <!-- BLE DIAGNOSTICS -->
+        <div class="service-section">
+          <div class="service-header">
+            <div class="service-title">
+              <div class="service-icon">📡</div>
+              <span>Diagnóstico BLE</span>
+            </div>
+          </div>
+          <div class="service-body">
+            <div class="diagnostics-grid">
+              <div class="diag-card">
+                <div class="diag-label">Paquetes</div>
+                <div class="diag-value" id="packetCount">0</div>
+              </div>
+              <div class="diag-card">
+                <div class="diag-label">Distancia</div>
+                <div class="diag-value" id="distance">--</div>
+              </div>
+              <div class="diag-card">
+                <div class="diag-label">RSSI</div>
+                <div class="diag-value" id="rssi">--</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ALERTS -->
+        <div class="alerts-section">
+          <div class="alerts-header"><h4>🔔 Alertas Recientes</h4></div>
+          <div class="alerts-list" id="alertsList">
+            <div class="alert-item info">
+              <div class="alert-header">
+                <span class="alert-type info">Sistema</span>
+                <span class="alert-time">--:--</span>
+              </div>
+              <div class="alert-message">Iniciando...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <div class="loading-overlay" id="loadingOverlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text" id="loadingText">Procesando...</div>
+  </div>
+
+  <div class="toast-container" id="toastContainer"></div>
+
+  <div class="modal-overlay" id="patientModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 class="modal-title">Detalle del Paciente</h3>
+        <button class="modal-close" onclick="closeModal()">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <script>
+    // Socket connection with fallback
+    let socket = null, demoMode = false;
+    try {
+      if (typeof io !== 'undefined') socket = io();
+      else throw new Error('No socket');
+    } catch(e) {
+      demoMode = true;
+      socket = { on: function(){}, emit: function(){} };
+    }
+
+    // 6 Patients (1 connected, 5 pending)
+    const patients = [
+      { id: 1, name: 'María García', age: 82, room: '101', spo2: null, hr: null, status: 'stable', connected: true, spo2_history: [], hr_history: [] },
+      { id: 2, name: 'José Martínez', age: 78, room: '102', spo2: null, hr: null, status: 'offline', connected: false, spo2_history: [], hr_history: [] },
+      { id: 3, name: 'Carmen López', age: 85, room: '103', spo2: null, hr: null, status: 'offline', connected: false, spo2_history: [], hr_history: [] },
+      { id: 4, name: 'Antonio Sánchez', age: 79, room: '104', spo2: null, hr: null, status: 'offline', connected: false, spo2_history: [], hr_history: [] },
+      { id: 5, name: 'Isabel Fernández', age: 88, room: '105', spo2: null, hr: null, status: 'offline', connected: false, spo2_history: [], hr_history: [] },
+      { id: 6, name: 'Francisco Ruiz', age: 76, room: '106', spo2: null, hr: null, status: 'offline', connected: false, spo2_history: [], hr_history: [] }
+    ];
+
+    let thresholds = { spo2_critical: 92, hr_low: 60, hr_high: 150 };
+    const charts = {};
+    let audioCtx = null, modalChart = null;
+
+    // Init
+    document.addEventListener('DOMContentLoaded', () => {
+      renderPatients();
+      updateStats();
+      updateTime();
+      setInterval(updateTime, 1000);
+      initEvents();
+      fetchEmailConfig();
+      
+      if (demoMode) {
+        setTimeout(() => {
+          document.getElementById('connectionDot').classList.add('connected');
+          document.getElementById('connectionStatus').textContent = 'Demo';
+          addAlert('info', 'Modo Demo', 'Simulando datos');
+          showToast('🎮 Modo Demo activo', 'info');
+          startDemo();
+        }, 500);
+      }
+    });
+
+    // Demo simulation
+    function startDemo() {
+      const p = patients[0];
+      p.spo2 = 96; p.hr = 72;
+      p.spo2_history = Array.from({length:20}, () => 96 + (Math.random()-0.5)*3);
+      p.hr_history = Array.from({length:20}, () => 72 + (Math.random()-0.5)*8);
+      updatePatientCard(p);
+      
+      setInterval(() => {
+        p.spo2 = Math.max(85, Math.min(100, p.spo2 + (Math.random()-0.5)*2));
+        p.hr = Math.max(50, Math.min(160, p.hr + (Math.random()-0.5)*5));
+        p.spo2_history.push(p.spo2); p.hr_history.push(p.hr);
+        if (p.spo2_history.length > 20) { p.spo2_history.shift(); p.hr_history.shift(); }
+        
+        const prev = p.status;
+        if (p.spo2 < thresholds.spo2_critical || p.hr > thresholds.hr_high || p.hr < thresholds.hr_low) {
+          p.status = 'critical';
+          if (prev !== 'critical') { addAlert('critical', `${p.name} crítico`, `SpO₂: ${Math.round(p.spo2)}% | FC: ${Math.round(p.hr)} bpm`, p.room); playBeep(); }
+        } else if (p.spo2 < thresholds.spo2_critical + 3) p.status = 'warning';
+        else p.status = 'stable';
+        
+        updatePatientCard(p);
+        updateStats();
+        document.getElementById('packetCount').textContent = Math.floor(Math.random()*500+100);
+        document.getElementById('distance').textContent = (Math.random()*2+0.5).toFixed(1)+'m';
+        document.getElementById('rssi').textContent = -50-Math.floor(Math.random()*25);
+      }, 3000);
+    }
+
+    // Socket events
+    socket.on('connect', () => {
+      document.getElementById('connectionDot').classList.add('connected');
+      document.getElementById('connectionStatus').textContent = 'Conectado';
+      addAlert('info', 'Conectado', 'Conexión establecida');
+      fetchEmailConfig();
+    });
+    socket.on('disconnect', () => {
+      document.getElementById('connectionDot').classList.remove('connected');
+      document.getElementById('connectionStatus').textContent = 'Desconectado';
+      addAlert('critical', 'Desconectado', 'Sin conexión');
+    });
+    socket.on('update', data => {
+      const p = patients[0];
+      p.spo2 = data.spo2; p.hr = data.hr; p.connected = true;
+      if (data.spo2_history) p.spo2_history = data.spo2_history;
+      if (data.hr_history) p.hr_history = data.hr_history;
+      
+      if (data.spo2_critical || data.hr_critical) {
+        if (p.status !== 'critical') { p.status = 'critical'; addAlert('critical', `${p.name} crítico`, `SpO₂: ${data.spo2}% | FC: ${data.hr} bpm`, p.room); playBeep(); }
+      } else if (data.spo2 < thresholds.spo2_critical + 3) p.status = 'warning';
+      else p.status = 'stable';
+      
+      updatePatientCard(p);
+      updateStats();
+    });
+    socket.on('raw_update', data => {
+      document.getElementById('packetCount').textContent = data.count || 0;
+      if (data.distance != null) document.getElementById('distance').textContent = data.distance + 'm';
+      document.getElementById('rssi').textContent = data.rssi ?? '--';
+    });
+    socket.on('alert_sent', data => showToast(`📧 ${data.message}`, 'success'));
+
+    // Render
+    function renderPatients() {
+      document.getElementById('patientsGrid').innerHTML = patients.map(p => `
+        <div class="patient-card ${p.connected ? p.status : 'offline'}" data-id="${p.id}" onclick="openModal(${p.id})">
+          <div class="patient-header">
+            <div class="patient-info">
+              <h3>${p.name}</h3>
+              <div class="patient-meta">🎂 ${p.age} años · 🚪 Hab. ${p.room}</div>
+            </div>
+            <span class="patient-status ${p.connected ? p.status : 'offline'}">${getStatusText(p)}</span>
+          </div>
+          <div class="patient-vitals">
+            <div class="vital-box">
+              <div class="vital-label">SpO₂</div>
+              <div class="vital-value ${getVitalClass(p,'spo2')}" id="spo2-${p.id}">${p.spo2 ? Math.round(p.spo2) : '--'}</div>
+              <div class="vital-unit">%</div>
+            </div>
+            <div class="vital-box">
+              <div class="vital-label">FC</div>
+              <div class="vital-value ${getVitalClass(p,'hr')}" id="hr-${p.id}">${p.hr ? Math.round(p.hr) : '--'}</div>
+              <div class="vital-unit">bpm</div>
+            </div>
+          </div>
+          <div class="patient-chart"><canvas id="chart-${p.id}"></canvas></div>
+          <div class="patient-footer">
+            <div class="ble-indicator">
+              <div class="ble-signal ${p.connected ? 'strong' : ''}">
+                <div class="ble-bar"></div><div class="ble-bar"></div><div class="ble-bar"></div><div class="ble-bar"></div>
+              </div>
+              <span>${p.connected ? 'Conectado' : 'Sin conexión'}</span>
+            </div>
+            <button class="action-btn" onclick="event.stopPropagation();generateReport(${p.id})" ${!p.connected?'disabled':''}>📄</button>
+          </div>
+        </div>
+      `).join('');
+      patients.forEach(p => initChart(p.id));
+    }
+
+    function updatePatientCard(p) {
+      const card = document.querySelector(`[data-id="${p.id}"]`);
+      if (!card) return;
+      document.getElementById(`spo2-${p.id}`).textContent = p.spo2 ? Math.round(p.spo2) : '--';
+      document.getElementById(`spo2-${p.id}`).className = `vital-value ${getVitalClass(p,'spo2')}`;
+      document.getElementById(`hr-${p.id}`).textContent = p.hr ? Math.round(p.hr) : '--';
+      document.getElementById(`hr-${p.id}`).className = `vital-value ${getVitalClass(p,'hr')}`;
+      card.className = `patient-card ${p.connected ? p.status : 'offline'}`;
+      card.querySelector('.patient-status').className = `patient-status ${p.connected ? p.status : 'offline'}`;
+      card.querySelector('.patient-status').textContent = getStatusText(p);
+      if (charts[p.id] && p.spo2_history.length) {
+        charts[p.id].data.labels = p.spo2_history.map((_,i)=>i);
+        charts[p.id].data.datasets[0].data = p.spo2_history;
+        charts[p.id].data.datasets[0].borderColor = p.status==='critical'?'#ef4444':p.status==='warning'?'#f59e0b':'#10b981';
+        charts[p.id].update('none');
+      }
+    }
+
+    function getStatusText(p) { return !p.connected ? '○ Sin conexión' : p.status==='critical' ? '⚠️ Crítico' : p.status==='warning' ? '⚡ Alerta' : '✓ Estable'; }
+    function getVitalClass(p, t) { if (!p.connected||!p[t]) return 'offline'; if (t==='spo2') return p.spo2<thresholds.spo2_critical?'warn':'good'; return (p.hr<thresholds.hr_low||p.hr>thresholds.hr_high)?'warn':'good'; }
+
+    function initChart(id) {
+      const ctx = document.getElementById(`chart-${id}`);
+      if (!ctx) return;
+      const p = patients.find(x=>x.id===id);
+      charts[id] = new Chart(ctx, {
+        type: 'line',
+        data: { labels: [], datasets: [{ data: p.spo2_history, borderColor: '#10b981', borderWidth: 2, fill: true, backgroundColor: 'rgba(16,185,129,0.1)', tension: 0.4, pointRadius: 0 }] },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false, min: 85, max: 100 } }, animation: false }
+      });
+    }
+
+    function updateStats() {
+      const c = patients.filter(p=>p.connected);
+      document.getElementById('statCritical').textContent = c.filter(p=>p.status==='critical').length;
+      document.getElementById('statWarning').textContent = c.filter(p=>p.status==='warning').length;
+      document.getElementById('statStable').textContent = c.filter(p=>p.status==='stable').length;
+    }
+    function updateTime() { document.getElementById('currentTime').textContent = new Date().toLocaleTimeString('es-ES'); }
+
+    function addAlert(type, title, msg, room) {
+      const list = document.getElementById('alertsList');
+      const time = new Date().toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'});
+      list.insertAdjacentHTML('afterbegin', `<div class="alert-item ${type}"><div class="alert-header"><span class="alert-type ${type}">${type==='critical'?'🚨 Crítico':type==='warning'?'⚠️ Alerta':'ℹ️ Info'}</span><span class="alert-time">${time}</span></div><div class="alert-message">${title}</div>${room?`<div class="alert-patient">📍 Hab. ${room} — ${msg}</div>`:`<div class="alert-patient">${msg}</div>`}</div>`);
+      while (list.children.length > 8) list.removeChild(list.lastChild);
+    }
+
+    function playBeep() { try { if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)(); const o=audioCtx.createOscillator(),g=audioCtx.createGain(); o.frequency.value=880;g.gain.value=0.1; o.connect(g);g.connect(audioCtx.destination); o.start();setTimeout(()=>o.stop(),200); } catch(e){} }
+
+    function initEvents() {
+      document.getElementById('saveEmailBtn').addEventListener('click', saveEmail);
+      document.getElementById('testEmailBtn').addEventListener('click', testEmail);
+      document.getElementById('generateReportBtn').addEventListener('click', () => generateReport(1));
+    }
+
+    function showToast(msg, type='info') {
+      const c = document.getElementById('toastContainer');
+      const t = document.createElement('div');
+      t.className = `toast ${type}`;
+      t.textContent = msg;
+      c.appendChild(t);
+      setTimeout(()=>t.classList.add('show'),10);
+      setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),300);},3500);
+    }
+
+    function openModal(id) {
+      const p = patients.find(x=>x.id===id);
+      document.getElementById('modalBody').innerHTML = `
+        <div class="modal-patient-header">
+          <div class="modal-patient-avatar">👤</div>
+          <div class="modal-patient-info">
+            <h2>${p.name}</h2>
+            <div class="modal-patient-meta"><span>🎂 ${p.age} años</span><span>🚪 Hab. ${p.room}</span><span class="patient-status ${p.connected?p.status:'offline'}">${getStatusText(p)}</span></div>
+          </div>
+        </div>
+        <div class="modal-vitals">
+          <div class="modal-vital-card"><div class="modal-vital-value" style="color:${getVitalClass(p,'spo2')==='warn'?'var(--accent-red)':getVitalClass(p,'spo2')==='good'?'var(--accent-green)':'var(--text-muted)'}">${p.spo2?Math.round(p.spo2):'--'}</div><div class="modal-vital-label">SpO₂ (%)</div></div>
+          <div class="modal-vital-card"><div class="modal-vital-value" style="color:${getVitalClass(p,'hr')==='warn'?'var(--accent-red)':getVitalClass(p,'hr')==='good'?'var(--accent-green)':'var(--text-muted)'}">${p.hr?Math.round(p.hr):'--'}</div><div class="modal-vital-label">FC (bpm)</div></div>
+        </div>
+        <div class="modal-chart"><canvas id="modalChart"></canvas></div>
+        <div class="btn-group" style="margin-top:16px">
+          <button class="btn btn-success" onclick="generateReport(${p.id})" ${!p.connected?'disabled':''}>📄 Generar Informe</button>
+          <button class="btn btn-secondary" onclick="closeModal()">Cerrar</button>
+        </div>`;
+      document.getElementById('patientModal').classList.add('show');
+      setTimeout(()=>{
+        const ctx=document.getElementById('modalChart');
+        if(ctx&&p.connected){
+          if(modalChart)modalChart.destroy();
+          modalChart=new Chart(ctx,{type:'line',data:{labels:Array.from({length:20},(_,i)=>i),datasets:[{label:'SpO₂',data:p.spo2_history.length?p.spo2_history:Array(20).fill(null),borderColor:'#0ea5e9',backgroundColor:'rgba(14,165,233,0.1)',tension:0.4,fill:true},{label:'FC',data:p.hr_history.length?p.hr_history:Array(20).fill(null),borderColor:'#10b981',backgroundColor:'rgba(16,185,129,0.1)',tension:0.4,fill:true,yAxisID:'y1'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:true}},scales:{x:{display:false},y:{display:true,min:80,max:100},y1:{display:true,position:'right',min:40,max:160,grid:{display:false}}}}});
+        }
+      },100);
+    }
+    function closeModal() { document.getElementById('patientModal').classList.remove('show'); }
+
+    async function fetchEmailConfig() {
+      if (demoMode) return;
+      try {
+        const r = await fetch('/api/email/config');
+        if (r.ok) {
+          const d = await r.json();
+          if (d.email_to) { document.getElementById('alertEmail').value = d.email_to; updateEmailStatus(d.email_to); }
+          if (d.thresholds) {
+            thresholds = {...thresholds,...d.thresholds};
+            document.getElementById('thresholdSpo2').value = d.thresholds.spo2_critical||92;
+            document.getElementById('thresholdHrLow').value = d.thresholds.hr_low||60;
+            document.getElementById('thresholdHrHigh').value = d.thresholds.hr_high||150;
+          }
+        }
+      } catch(e){}
+    }
+
+    function updateEmailStatus(email) {
+      const s = document.getElementById('emailServiceStatus');
+      if (email&&email.includes('@')) { s.className='service-status active'; s.textContent='✓ Activo'; }
+      else { s.className='service-status inactive'; s.textContent='No config.'; }
+    }
+
+    async function saveEmail() {
+      const email = document.getElementById('alertEmail').value.trim();
+      if (!email||!email.includes('@')) { showToast('Email inválido','error'); return; }
+      thresholds.spo2_critical = parseInt(document.getElementById('thresholdSpo2').value)||92;
+      thresholds.hr_low = parseInt(document.getElementById('thresholdHrLow').value)||60;
+      thresholds.hr_high = parseInt(document.getElementById('thresholdHrHigh').value)||150;
+      const btn = document.getElementById('saveEmailBtn');
+      btn.disabled=true; btn.textContent='⏳';
+      if (demoMode) { setTimeout(()=>{updateEmailStatus(email);showToast('✅ Guardado (Demo)','success');btn.disabled=false;btn.textContent='💾 Guardar';},500); return; }
+      try {
+        const r = await fetch('/api/email/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email_to:email,patient_name:patients[0].name,patient_room:patients[0].room,patient_residence:document.getElementById('centerName').value})});
+        if(r.ok){updateEmailStatus(email);showToast('✅ Configuración guardada','success');}else showToast('Error','error');
+      }catch(e){showToast('Error de conexión','error');}
+      finally{btn.disabled=false;btn.textContent='💾 Guardar';}
+    }
+
+    async function testEmail() {
+      const email = document.getElementById('alertEmail').value.trim();
+      if(!email){showToast('Configura email primero','error');return;}
+      const btn = document.getElementById('testEmailBtn');
+      btn.disabled=true;btn.textContent='⏳';
+      if(demoMode){setTimeout(()=>{showToast('📧 Email simulado','success');btn.disabled=false;btn.textContent='📤 Probar';},800);return;}
+      try{
+        const r=await fetch('/api/email/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email_to:email,patient_name:patients[0].name})});
+        const d=await r.json();
+        showToast(r.ok?(d.message||'✅ Enviado'):(d.error||'Error'),r.ok?'success':'error');
+      }catch(e){showToast('Error','error');}
+      finally{btn.disabled=false;btn.textContent='📤 Probar';}
+    }
+
+    async function generateReport(id) {
+      const p = patients.find(x=>x.id===id);
+      if(!p||!p.connected){showToast('Paciente sin conexión','error');return;}
+      const overlay = document.getElementById('loadingOverlay');
+      overlay.classList.add('show');
+      document.getElementById('loadingText').textContent=`Generando informe para ${p.name}...`;
+      if(demoMode){setTimeout(()=>{overlay.classList.remove('show');showToast(`✅ Informe generado (Demo)`,'success');addAlert('info','Informe generado',`PDF para ${p.name}`,p.room);},2000);return;}
+      try{
+        const r=await fetch('/api/report/pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:p.name,age:p.age,residence:document.getElementById('centerName').value,room:p.room})});
+        if(r.ok){const b=await r.blob(),u=URL.createObjectURL(b),a=document.createElement('a');a.href=u;a.download=`informe_${p.name.replace(/\s/g,'_')}_${new Date().toISOString().slice(0,10)}.pdf`;a.click();URL.revokeObjectURL(u);showToast('✅ Informe descargado','success');}
+        else showToast('Error al generar','error');
+      }catch(e){showToast('Error de conexión','error');}
+      finally{overlay.classList.remove('show');}
+    }
+
+    document.getElementById('patientModal').addEventListener('click',e=>{if(e.target.classList.contains('modal-overlay'))closeModal();});
+  </script>
+</body>
+</html>
