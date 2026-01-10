@@ -46,8 +46,9 @@ LLM_MODEL = "gpt-4o-mini"
 SYSTEM_NAME = "HumanS – Monitorización Vital Continua"
 ALGORITHM_VERSION = "1.9.0-enhanced-report"
 
-BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "tu-email@gmail.com")  # Tu email de Brevo
+MAILJET_API_KEY = os.environ.get("MAILJET_API_KEY", "")
+MAILJET_SECRET_KEY = os.environ.get("MAILJET_SECRET_KEY", "")
+MAILJET_SENDER_EMAIL = os.environ.get("MAILJET_SENDER_EMAIL", "")
 
 email_config = {"email_to": "", "patient_name": "", "patient_room": "", "patient_residence": ""}
 
@@ -745,9 +746,11 @@ Devuelve SOLO HTML válido y completo. Sin explicaciones ni markdown."""
 
 def check_email_config():
     issues = []
-    if not BREVO_API_KEY: issues.append("BREVO_API_KEY no configurado")
+    if not MAILJET_API_KEY: issues.append("MAILJET_API_KEY no configurado")
+    if not MAILJET_SECRET_KEY: issues.append("MAILJET_SECRET_KEY no configurado")
+    if not MAILJET_SENDER_EMAIL: issues.append("MAILJET_SENDER_EMAIL no configurado")
     if not email_config.get("email_to"): issues.append("Email destinatario no configurado")
-    return {"configured": len(issues)==0, "issues": issues, "provider": "Brevo API"}
+    return {"configured": len(issues)==0, "issues": issues, "provider": "Mailjet API"}
 
 def generate_email_html(alert_type, spo2, hr, patient_info):
     now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
@@ -767,19 +770,46 @@ def generate_email_html(alert_type, spo2, hr, patient_info):
     <p style="font-size:11px;color:#888;text-align:center;">{SYSTEM_NAME} v{ALGORITHM_VERSION} | {now}</p>
     </div></body></html>"""
 
-def send_email_brevo(recipient, subject, html):
-    if not BREVO_API_KEY: return {"success": False, "error": "API key no configurado"}
-    if not recipient: return {"success": False, "error": "Sin destinatario"}
+def send_email_mailjet(recipient, subject, html):
+    """Envía email usando Mailjet API"""
+    if not MAILJET_API_KEY or not MAILJET_SECRET_KEY: 
+        return {"success": False, "error": "API keys no configuradas"}
+    if not MAILJET_SENDER_EMAIL:
+        return {"success": False, "error": "Email remitente no configurado"}
+    if not recipient: 
+        return {"success": False, "error": "Sin destinatario"}
+    
     print(f"📧 Enviando a {recipient}...")
+    
     try:
-        r = requests.post("https://api.brevo.com/v3/smtp/email",
-            headers={"api-key": BREVO_API_KEY, "Content-Type": "application/json", "accept": "application/json"},
-            json={"sender": {"email": EMAIL_FROM}, "to": [{"email": recipient}], "subject": subject, "htmlContent": html}, timeout=30)
-        if r.status_code == 201:
-            print(f"✅ Email enviado! ID: {r.json().get('messageId')}")
-            return {"success": True}
-        print(f"❌ Error: {r.text}")
-        return {"success": False, "error": r.json().get("message", f"HTTP {r.status_code}")}
+        r = requests.post(
+            "https://api.mailjet.com/v3.1/send",
+            auth=(MAILJET_API_KEY, MAILJET_SECRET_KEY),
+            json={
+                "Messages": [{
+                    "From": {
+                        "Email": MAILJET_SENDER_EMAIL,
+                        "Name": "HumanS Alertas"
+                    },
+                    "To": [{
+                        "Email": recipient
+                    }],
+                    "Subject": subject,
+                    "HTMLPart": html
+                }]
+            },
+            timeout=30
+        )
+        
+        if r.status_code == 200:
+            result = r.json()
+            if result.get("Messages", [{}])[0].get("Status") == "success":
+                print(f"✅ Email enviado correctamente!")
+                return {"success": True}
+        
+        print(f"❌ Error: {r.status_code} - {r.text}")
+        return {"success": False, "error": f"HTTP {r.status_code}"}
+        
     except Exception as e:
         print(f"❌ Error: {e}")
         return {"success": False, "error": str(e)}
@@ -793,7 +823,8 @@ def send_alert_email(alert_type, spo2, hr):
     else:
         cond = "Bradicardia" if hr < CRITICAL_HR_LOW else "Taquicardia"
         subject = f"⚠️ ALERTA HumanS - {cond} {hr}bpm - {patient_info['name']}"
-    result = send_email_brevo(recipient, subject, generate_email_html(alert_type, spo2, hr, patient_info))
+    
+    result = send_email_mailjet(recipient, subject, generate_email_html(alert_type, spo2, hr, patient_info))
     save_alert(alert_type, spo2, hr, subject, result["success"], recipient, patient_info["name"])
     if result["success"]:
         socketio.emit('alert_sent', {'type': alert_type, 'message': f'Email enviado a {recipient}'})
@@ -937,9 +968,9 @@ def test_email():
     d = request.get_json() or {}
     recipient = d.get("email_to") or email_config.get("email_to")
     if not recipient: return jsonify({"error": "No hay email configurado"}), 400
-    if not BREVO_API_KEY: return jsonify({"error": "BREVO_API_KEY no configurado"}), 500
+    if not MAILJET_API_KEY: return jsonify({"error": "MAILJET_API_KEY no configurado"}), 500
     patient = d.get("patient_name") or email_config.get("patient_name","Prueba")
-    result = send_email_brevo(recipient, f"🧪 TEST HumanS - {patient}", generate_email_html('test', 97, 72, {"name": patient}))
+    result = send_email_mailjet(recipient, f"🧪 TEST HumanS - {patient}", generate_email_html('test', 97, 72, {"name": patient}))
     if result["success"]: return jsonify({"status": "ok", "message": f"✅ Email enviado a {recipient}"})
     return jsonify({"error": result.get("error")}), 500
 
@@ -978,7 +1009,8 @@ print(f"""
 ║  Versión: {ALGORITHM_VERSION}
 ╠══════════════════════════════════════════════════════════════╣
 ║  DATABASE_URL: {'✅ Configurado' if DATABASE_URL else '❌ No configurado'}
-║  BREVO_API_KEY: {'✅ Configurado' if BREVO_API_KEY else '❌ No configurado'}
+║  MAILJET_API_KEY: {'✅ Configurado' if MAILJET_API_KEY else '❌ No configurado'}
+║  MAILJET_SECRET_KEY: {'✅ Configurado' if MAILJET_SECRET_KEY else '❌ No configurado'}
 ║  OPENAI_API_KEY: {'✅ Configurado' if os.environ.get('OPENAI_API_KEY') else '❌ No configurado'}
 ╚══════════════════════════════════════════════════════════════╝
 """)
