@@ -60,6 +60,8 @@ CRITICAL_SPO2 = 92
 CRITICAL_HR_LOW = 60
 CRITICAL_HR_HIGH = 150
 EMAIL_COOLDOWN = 300
+DEVICE_OFFLINE_TIMEOUT = 60  # Segundos sin datos para considerar "desconectado"
+DEVICE_CONNECT_COOLDOWN = 300  # Cooldown entre notificaciones de conexión
 
 MAX_HISTORY = 120
 spo2_hist = deque(maxlen=MAX_HISTORY)
@@ -73,6 +75,7 @@ last_spo2_alert_time = 0
 last_hr_alert_time = 0
 last_spo2_critical = False
 last_hr_critical = False
+last_device_connect_notification = 0  # Timestamp última notificación de conexión
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'humans-2024')
@@ -838,6 +841,47 @@ def send_alert_email(alert_type, spo2, hr):
 def send_alert_async(alert_type, spo2, hr):
     eventlet.spawn(lambda: send_alert_email(alert_type, spo2, hr))
 
+def generate_device_connected_html(patient_info):
+    """Genera HTML para notificación de dispositivo conectado"""
+    now = datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M:%S UTC")
+    return f"""<!DOCTYPE html><html><body style="font-family:Arial;max-width:600px;margin:auto;padding:20px;">
+    <div style="background:#28a745;color:white;padding:20px;border-radius:10px 10px 0 0;text-align:center;">
+        <h1 style="margin:0;">🟢 Dispositivo Conectado</h1>
+    </div>
+    <div style="background:#f8f9fa;padding:20px;border-radius:0 0 10px 10px;">
+        <div style="font-size:24px;font-weight:bold;color:#28a745;text-align:center;margin:20px;">
+            El sensor ha comenzado a transmitir datos
+        </div>
+        <p><strong>Paciente:</strong> {patient_info.get('name','N/A')}</p>
+        <p><strong>Habitación:</strong> {patient_info.get('room','N/A')}</p>
+        <p><strong>Residencia:</strong> {patient_info.get('residence','N/A')}</p>
+        <p style="font-size:11px;color:#888;text-align:center;margin-top:20px;">
+            {SYSTEM_NAME} v{ALGORITHM_VERSION} | {now}
+        </p>
+    </div></body></html>"""
+
+def send_device_connected_notification():
+    """Envía notificación de que el dispositivo se ha conectado"""
+    recipient = email_config.get("email_to")
+    if not recipient:
+        return False
+    
+    patient_info = {
+        "name": email_config.get("patient_name", "N/A"),
+        "room": email_config.get("patient_room", "N/A"),
+        "residence": email_config.get("patient_residence", "N/A")
+    }
+    
+    subject = f"🟢 HumanS - Dispositivo Conectado - {patient_info['name']}"
+    result = send_email_mailjet(recipient, subject, generate_device_connected_html(patient_info))
+    
+    if result["success"]:
+        print(f"✅ Notificación de conexión enviada a {recipient}")
+    return result["success"]
+
+def send_device_connected_async():
+    eventlet.spawn(send_device_connected_notification)
+
 # ============================================================
 # AUTENTICACIÓN
 # ============================================================
@@ -865,16 +909,30 @@ def dashboard():
 def receive_data():
     global packet_count, current_distance, current_rssi, last_packet_time
     global last_spo2_critical, last_hr_critical, last_spo2_alert_time, last_hr_alert_time
+    global last_device_connect_notification
     try:
         p = request.get_json(force=True)
         spo2, hr = p.get("spo2"), p.get("hr")
         if spo2 is None or hr is None: return jsonify({"error": "Missing data"}), 400
         if not (35 <= spo2 <= 100) or not (25 <= hr <= 250): return jsonify({"error": "Out of range"}), 400
         
+        now_ts = time.time()
+        now_dt = datetime.now(timezone.utc)
+
+        device_was_offline = (
+            last_packet_time is None or
+            (now_dt - last_packet_time).total_seconds() > DEVICE_OFFLINE_TIMEOUT
+        )
+
+        if device_was_offline and (now_ts - last_device_connect_notification > DEVICE_CONNECT_COOLDOWN):
+            print(f"🟢 Dispositivo conectado!")
+            send_device_connected_async()
+            last_device_connect_notification = now_ts
+        
         packet_count += 1
         current_distance = p.get("distance", 0)
         current_rssi = p.get("rssi")
-        last_packet_time = datetime.now(timezone.utc)
+        last_packet_time = now_dt 
         spo2_hist.append(spo2)
         hr_hist.append(hr)
         
